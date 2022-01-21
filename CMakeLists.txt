@@ -16,6 +16,7 @@ pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
 
 add_subdirectory(examples)
+add_subdirectory(lib/Raptor-Codes-rfc5053)
 
 include_directories(
     "${PROJECT_BINARY_DIR}"
@@ -23,6 +24,7 @@ include_directories(
 
     SYSTEM
     ${PROJECT_SOURCE_DIR}/utils
+    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
     ${SPDLOG_INCLUDEDIR}
     PkgConfig::NETLINK
     )
@@ -30,6 +32,7 @@ include_directories(
 configure_file("include/Version.h.in" "Version.h")
 
 link_directories(
+    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
     )
 
 set(CMAKE_CXX_CLANG_TIDY clang-tidy --format-style=google --checks=clang-diagnostic-*,clang-analyzer-*,-*,bugprone*,modernize*,performance*,-modernize-use-trailing-return-type,-modernize-avoid-c-arrays,-modernize-avoid-bind)
@@ -55,6 +58,7 @@ target_link_libraries( flute
     z
     pthread
     crypto
+    raptor
     PkgConfig::TINYXML
     PkgConfig::NETLINK
 )

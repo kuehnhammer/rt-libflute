@@ -26,20 +26,39 @@
 #include "base64.h"
 #include "spdlog/spdlog.h"
 
+#include "Partition.h"
+#include "Array_Data_Types.h"
+#include "R10_Decoder.h"
+
 LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry)
   : _meta( std::move(entry) )
   , _received_at( time(nullptr) )
 {
   // Allocate a data buffer
-  _buffer = (char*)malloc(_meta.fec_oti.transfer_length);
+  _buffer = (char*)malloc(_meta.content_length);
   if (_buffer == nullptr)
   {
     throw "Failed to allocate file buffer";
   }
   _own_buffer = true;
 
-  calculate_partitioning();
+  if (_meta.fec_oti.encoding_id == FecScheme::Raptor) {
+    if (_meta.fec_oti.scheme_specific_info.length() != 4) {
+      throw "Missing or malformed scheme specific info for Raptor FEC";
+    }
+    _nof_source_blocks |= (uint8_t)_meta.fec_oti.scheme_specific_info[0] << 8;
+    _nof_source_blocks |= (uint8_t)_meta.fec_oti.scheme_specific_info[1];
+    _nof_sub_blocks = (uint8_t)_meta.fec_oti.scheme_specific_info[2];
+    _symbol_alignment = (uint8_t)_meta.fec_oti.scheme_specific_info[3];
+
+    calculate_raptor_partitioning();
+    create_raptor_blocks();
+
+//     _meta.fec_oti.encoding_symbol_length); 
+  } else if (_meta.fec_oti.encoding_id == FecScheme::CompactNoCode) {
+    calculate_compactnocode_partitioning();
   create_blocks();
+  }
 }
 
 LibFlute::File::File(uint32_t toi,
@@ -72,7 +91,7 @@ LibFlute::File::File(uint32_t toi,
   _meta.content_length = length;
   _meta.content_md5 = base64_encode(md5, MD5_DIGEST_LENGTH);
   _meta.expires = expires;
-  _meta.fec_oti = fec_oti;
+  _meta.fec_oti = std::move(fec_oti);
 
   // for no-code
   if (_meta.fec_oti.encoding_id == FecScheme::CompactNoCode) { 
@@ -81,7 +100,7 @@ LibFlute::File::File(uint32_t toi,
     throw "Unsupported FEC scheme";
   }
 
-  calculate_partitioning();
+  calculate_compactnocode_partitioning();
   create_blocks();
 }
 
@@ -98,21 +117,47 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
   if (symbol.source_block_number() > _source_blocks.size()) {
     throw "Source Block number too high";
   } 
-
   SourceBlock& source_block = _source_blocks[ symbol.source_block_number() ];
-  
-  if (symbol.id() > source_block.symbols.size()) {
-    throw "Encoding Symbol ID too high";
-  } 
 
-  SourceBlock::Symbol& target_symbol = source_block.symbols[symbol.id()];
+  if (_meta.fec_oti.encoding_id == FecScheme::CompactNoCode) {
+    if (symbol.id() > source_block.symbols.size()) {
+      throw "Encoding Symbol ID too high";
+    } 
 
-  if (!target_symbol.complete) {
-    symbol.decode_to(target_symbol.data, target_symbol.length);
-    target_symbol.complete = true;
+    SourceBlock::Symbol& target_symbol = source_block.symbols[symbol.id()];
 
-    check_source_block_completion(source_block);
-    check_file_completion();
+    if (!target_symbol.complete) {
+      symbol.copy_encoded(target_symbol.data, target_symbol.length);
+      target_symbol.complete = true;
+
+      check_source_block_completion(source_block);
+      check_file_completion();
+    }
+  } else if (_meta.fec_oti.encoding_id == FecScheme::Raptor) {
+    //  if (symbol.id() == 2) return; // intentionally drop a symbol for testing purposes
+
+    source_block.raptor_enc_symbols->ESIs.push_back(symbol.id());
+    source_block.raptor_enc_symbols->symbol.emplace_back(_meta.fec_oti.encoding_symbol_length);
+    source_block.raptor_enc_symbols->symbol.back().data_reading( symbol.buffer() );
+
+    if (source_block.raptor_enc_symbols->ESIs.size() >= source_block.symbols.size()) {
+      // attempt to decode
+      try {
+        R10_Decoder decoder(source_block.symbols.size(), _meta.fec_oti.encoding_symbol_length);
+        auto source = decoder.Get_Source_Symbol(*source_block.raptor_enc_symbols.get(), source_block.raptor_enc_symbols->ESIs.size());
+        spdlog::debug("R10 decoding succeeded");
+
+        for (int i = 0; i < source_block.symbols.size(); i++) {
+          SourceBlock::Symbol& target_symbol = source_block.symbols[i];
+          std::copy(source.symbol[i].s.begin(), source.symbol[i].s.end(), target_symbol.data);
+          target_symbol.complete = true;
+        }
+      } catch(const char* ex) {
+        spdlog::debug("R10 decoding failed: {}", ex);
+      }
+      check_source_block_completion(source_block);
+      check_file_completion();
+    }
   }
 
 }
@@ -126,7 +171,8 @@ auto LibFlute::File::check_file_completion() -> void
 {
   _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(), [](const auto& block){ return block.second.complete; });
 
-  if (_complete && !_meta.content_md5.empty()) {
+  if (_complete && _enable_md5_check && !_meta.content_md5.empty()) {
+    //Array_Data_Symbol testing_symbol(SYMBOL_SIZE, SYMBOL_LEN);
     //check MD5 sum
     unsigned char md5[MD5_DIGEST_LENGTH];
     MD5((const unsigned char*)buffer(), length(), md5);
@@ -147,21 +193,31 @@ auto LibFlute::File::check_file_completion() -> void
   }
 }
 
-auto LibFlute::File::calculate_partitioning() -> void
+auto LibFlute::File::calculate_compactnocode_partitioning() -> void
 {
   // Calculate source block partitioning (RFC5052 9.1) 
-  _nof_source_symbols = ceil((double)_meta.fec_oti.transfer_length / (double)_meta.fec_oti.encoding_symbol_length);
+  _nof_source_symbols = ceil((double)_meta.content_length / (double)_meta.fec_oti.encoding_symbol_length);
   _nof_source_blocks = ceil((double)_nof_source_symbols / (double)_meta.fec_oti.max_source_block_length);
   _large_source_block_length = ceil((double)_nof_source_symbols / (double)_nof_source_blocks);
   _small_source_block_length = floor((double)_nof_source_symbols / (double)_nof_source_blocks);
   _nof_large_source_blocks = _nof_source_symbols - _small_source_block_length * _nof_source_blocks;
 }
 
+auto LibFlute::File::calculate_raptor_partitioning() -> void
+{
+  uint32_t Kt = ceil(ceil((double)_meta.content_length / (double)_meta.fec_oti.encoding_symbol_length));
+  auto p1 = Partition(Kt, _nof_source_blocks); 
+  auto p2 = Partition(_meta.fec_oti.encoding_symbol_length / _symbol_alignment, _nof_source_blocks); 
+  _nof_large_source_blocks = p1.get(2);
+  _large_source_block_length = p1.get(0);
+  _small_source_block_length = p1.get(1);
+}
+
 auto LibFlute::File::create_blocks() -> void
 {
   // Create the required source blocks and encoding symbols
   auto buffer_ptr = _buffer;
-  size_t remaining_size = _meta.fec_oti.transfer_length;
+  size_t remaining_size = _meta.content_length;
   auto number = 0;
   while (remaining_size > 0) {
     SourceBlock block;
@@ -170,7 +226,7 @@ auto LibFlute::File::create_blocks() -> void
 
     for (int i = 0; i < block_length; i++) {
       auto symbol_length = std::min(remaining_size, (size_t)_meta.fec_oti.encoding_symbol_length);
-      assert(buffer_ptr + symbol_length <= _buffer + _meta.fec_oti.transfer_length);
+      assert(buffer_ptr + symbol_length <= _buffer + _meta.content_length);
 
       SourceBlock::Symbol symbol{.data = buffer_ptr, .length = symbol_length, .complete = false};
       block.symbols[ symbol_id++ ] = symbol;
@@ -181,6 +237,36 @@ auto LibFlute::File::create_blocks() -> void
       if (remaining_size <= 0) break;
     }
     _source_blocks[number++] = block;
+  }
+}
+
+auto LibFlute::File::create_raptor_blocks() -> void
+{
+  // Create the required source blocks and encoding symbols
+  auto buffer_ptr = _buffer;
+  size_t remaining_size = _meta.content_length;
+  auto number = 0;
+  while (remaining_size > 0) {
+    SourceBlock block;
+    auto symbol_id = 0;
+    auto block_length = ( number < _nof_large_source_blocks ) ? _large_source_block_length : _small_source_block_length;
+
+    block.raptor_enc_symbols = std::make_shared<Array_Data_Symbol>(block_length);
+    block.raptor_enc_symbols->sym_len = _meta.fec_oti.encoding_symbol_length;
+
+    for (int i = 0; i < block_length; i++) {
+      auto symbol_length = std::min(remaining_size, (size_t)_meta.fec_oti.encoding_symbol_length);
+      assert(buffer_ptr + symbol_length <= _buffer + _meta.content_length);
+
+      SourceBlock::Symbol symbol{.data = buffer_ptr, .length = symbol_length, .complete = false};
+      block.symbols[ symbol_id++ ] = symbol;
+      
+      remaining_size -= symbol_length;
+      buffer_ptr += symbol_length;
+      
+      if (remaining_size <= 0) break;
+    }
+    _source_blocks[number++] = std::move(block);
   }
 }
 

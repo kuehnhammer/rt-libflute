@@ -42,7 +42,8 @@ namespace LibFlute {
    *  Error correction schemes 
    */
   enum class FecScheme {
-    CompactNoCode
+    CompactNoCode,
+    Raptor
   };
 
   /**
@@ -53,5 +54,6 @@ namespace LibFlute {
     uint64_t transfer_length;
     uint32_t encoding_symbol_length;
     uint32_t max_source_block_length;
+    std::string scheme_specific_info;
   };
 };

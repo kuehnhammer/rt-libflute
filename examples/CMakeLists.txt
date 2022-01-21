@@ -18,6 +18,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/src
 
     SYSTEM
+    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
     ${SPDLOG_INCLUDEDIR}
     )
 

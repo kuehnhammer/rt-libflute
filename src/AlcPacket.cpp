@@ -83,8 +83,10 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
 
   if (_lct_header.codepoint == 0) {
     _fec_oti.encoding_id = FecScheme::CompactNoCode;
+  } else if (_lct_header.codepoint == 1) {
+    _fec_oti.encoding_id = FecScheme::Raptor;
   } else {
-    throw "Only Compact No-Code FEC is supported";
+    throw "Unsupported FEC scheme";
   }
 
   auto expected_header_len = 2 +
@@ -130,8 +132,8 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
                     }
       case EXT_FDT: {
                       uint8_t flute_version = (*hdr_ptr & 0xF0) >> 4;
-                      if (flute_version > 2) {
-                        throw "Unsupported FLUTE version";
+                      if (flute_version != 1) {
+                        throw "Only FLUTE version 1 is supported";
                       }
                       _fdt_instance_id =  (*hdr_ptr & 0x0F) << 16;
                       hdr_ptr++;
@@ -175,6 +177,13 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
 
   lct_header->version = 1;
   lct_header->half_word_flag = 1;
+  if (fec_oti.encoding_id == LibFlute::FecScheme::CompactNoCode) {
+    lct_header->codepoint = 0;
+  } else if (fec_oti.encoding_id == LibFlute::FecScheme::Raptor) {
+    lct_header->codepoint = 1;
+  } else {
+    throw "Unsupported FEC scheme";
+  }
   lct_header->lct_header_len = lct_header_len;
   auto hdr_ptr = _buffer + 4;
   auto payload_ptr = _buffer + 4 * lct_header_len;
@@ -219,11 +228,6 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
   memset(&_lct_header, 0, sizeof(_lct_header));
   _lct_header.version = 1;
   _lct_header.half_word_flag = 1;
-  if (fec_scheme == LibFlute::FecScheme::CompactNoCode) {
-    _lct_header.codepoint = 0;
-  } else {
-    throw "Only Compact No-Code FEC is supported";
-  }
   */
 
 }

@@ -30,21 +30,20 @@ auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len,
     throw "Only unencoded content is supported";
   }
   
-  if (fec_oti.encoding_id == FecScheme::CompactNoCode) {
+  if (fec_oti.encoding_id == FecScheme::CompactNoCode ||
+      fec_oti.encoding_id == FecScheme::Raptor) {
     source_block_number = ntohs(*(uint16_t*)encoded_data);
     encoded_data += 2;
     encoding_symbol_id = ntohs(*(uint16_t*)encoded_data);
     encoded_data += 2;
     data_len -= 4;
   } else {
-    throw "Only compact no-code FEC is supported";
+    throw "Unsupported FEC scheme";
   }
 
   int nof_symbols = std::ceil((float)data_len / (float)fec_oti.encoding_symbol_length);
   for (int i = 0; i < nof_symbols; i++) {
-    if (fec_oti.encoding_id == FecScheme::CompactNoCode) {
-      symbols.emplace_back(encoding_symbol_id, source_block_number, encoded_data, std::min(data_len, (size_t)fec_oti.encoding_symbol_length), fec_oti.encoding_id);
-    }
+    symbols.emplace_back(encoding_symbol_id, source_block_number, encoded_data, std::min(data_len, (size_t)fec_oti.encoding_symbol_length), fec_oti.encoding_id);
     encoded_data += fec_oti.encoding_symbol_length;
     encoding_symbol_id++;
   }
@@ -57,19 +56,20 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   size_t len = 0;
   auto ptr = encoded_data;
   auto first_symbol = symbols.begin();
-  if (fec_oti.encoding_id == FecScheme::CompactNoCode) {
+  if (fec_oti.encoding_id == FecScheme::CompactNoCode ||
+      fec_oti.encoding_id == FecScheme::Raptor) {
     *((uint16_t*)ptr) = htons(first_symbol->source_block_number());
     ptr += 2;
     *((uint16_t*)ptr) = htons(first_symbol->id());
     ptr += 2;
     len += 4;
   } else {
-    throw "Only compact no-code FEC is supported";
+    throw "Unsupported FEC scheme";
   }
 
   for (const auto& symbol : symbols) {
     if (symbol.len() <= data_len) {
-      auto symbol_len = symbol.encode_to(ptr, data_len);
+      auto symbol_len = symbol.copy_encoded(ptr, data_len);
       data_len -= symbol_len;
       encoded_data += symbol_len;
       len += symbol_len;
@@ -78,20 +78,20 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   return len;
 }
 
-auto LibFlute::EncodingSymbol::decode_to(char* buffer, size_t max_length) const -> void {
+auto LibFlute::EncodingSymbol::decode_to(char* buffer, size_t max_length) const -> bool {
   if (_fec_scheme == FecScheme::CompactNoCode) {
     if (_data_len <= max_length) {
       memcpy(buffer, _encoded_data, _data_len);
+      return true;
     }
+    return false;
   }
 }
 
-auto LibFlute::EncodingSymbol::encode_to(char* buffer, size_t max_length) const -> size_t {
-  if (_fec_scheme == FecScheme::CompactNoCode) {
-    if (_data_len <= max_length) {
-      memcpy(buffer, _encoded_data, _data_len);
-      return _data_len;
-    }
+auto LibFlute::EncodingSymbol::copy_encoded(char* buffer, size_t max_length) const -> size_t {
+  if (_data_len <= max_length) {
+    memcpy(buffer, _encoded_data, _data_len);
+    return _data_len;
   }
   return 0;
 }

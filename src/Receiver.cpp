@@ -123,7 +123,7 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
           }
         }
       } else {
-        spdlog::debug("Discarding packet for unknown or already completed file with TOI {}", alc.toi());
+        spdlog::trace("Discarding packet for unknown or already completed file with TOI {}", alc.toi());
       }
     } catch (std::exception ex) {
       spdlog::warn("Failed to decode ALC/FLUTE packet: {}", ex.what());

@@ -17,6 +17,7 @@
 #include "tinyxml2.h" 
 #include <iostream>
 #include <string>
+#include "base64.h"
 #include "spdlog/spdlog.h"
 
 
@@ -35,6 +36,7 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   _expires = std::stoull(fdt_instance->Attribute("Expires"));
 
   spdlog::debug("Received new FDT with instance ID {}", instance_id);
+  spdlog::trace("FDT content:\n{}", buffer);
 
   uint8_t def_fec_encoding_id = 0;
   auto val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
@@ -108,6 +110,13 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     if (val != nullptr) {
       encoding_symbol_length = strtoul(val, nullptr, 0);
     }
+
+    std::string scheme_specific_info = "";
+    auto ssi = file->Attribute("FEC-OTI-Scheme-Specific-Info");
+    if (ssi) {
+      scheme_specific_info = base64_decode((const std::string&)ssi);
+    }
+
     uint32_t expires = 0;
     auto cc = file->FirstChildElement("mbms2007:Cache-Control");
     if (cc) {
@@ -121,7 +130,8 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       (FecScheme)encoding_id,
         transfer_length,
         encoding_symbol_length,
-        max_source_block_length
+        max_source_block_length,
+        scheme_specific_info
     };
 
     FileEntry fe{

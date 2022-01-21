@@ -149,7 +149,7 @@ auto main(int argc, char **argv) -> int {
         arguments.flute_interface,
         arguments.mcast_target,
         (short)arguments.mcast_port,
-        0,
+        17,
         io);
 
     // Configure IPSEC, if enabled
@@ -162,9 +162,9 @@ auto main(int argc, char **argv) -> int {
         [](std::shared_ptr<LibFlute::File> file) { //NOLINT
         spdlog::info("{} (TOI {}) has been received",
             file->meta().content_location, file->meta().toi);
-        FILE* fd = fopen(file->meta().content_location.c_str(), "wb");
-        fwrite(file->buffer(), 1, file->length(), fd);
-        fclose(fd);
+  //      FILE* fd = fopen(file->meta().content_location.c_str(), "wb");
+  //      fwrite(file->buffer(), 1, file->length(), fd);
+  //      fclose(fd);
         });
 
     // Start the IO service

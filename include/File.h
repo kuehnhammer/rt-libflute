@@ -22,6 +22,8 @@
 #include "FileDeliveryTable.h"
 #include "EncodingSymbol.h"
 
+#include "Array_Data_Types.h"
+
 namespace LibFlute {
   /**
    *  Represents a file being transmitted or received
@@ -79,7 +81,7 @@ namespace LibFlute {
      /**
       *  Get the data buffer length
       */
-      size_t length() const { return _meta.fec_oti.transfer_length; };
+      size_t length() const { return _meta.content_length; };
 
      /**
       *  Get the FEC OTI values
@@ -127,8 +129,10 @@ namespace LibFlute {
       uint16_t fdt_instance_id() { return _fdt_instance_id; };
 
     private:
-      void calculate_partitioning();
+      void calculate_compactnocode_partitioning();
+      void calculate_raptor_partitioning();
       void create_blocks();
+      void create_raptor_blocks();
 
       struct SourceBlock {
         bool complete = false;
@@ -139,20 +143,28 @@ namespace LibFlute {
           bool queued = false;
         };
         std::map<uint16_t, Symbol> symbols; 
+        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
       };
 
       void check_source_block_completion(SourceBlock& block);
       void check_file_completion();
 
       std::map<uint16_t, SourceBlock> _source_blocks; 
+      
 
       bool _complete = false;;
 
-      uint32_t _nof_source_symbols = 0;
       uint32_t _nof_source_blocks = 0;
+
+      // only for Compact No-Code FEC
+      uint32_t _nof_source_symbols = 0;
       uint32_t _nof_large_source_blocks = 0;
       uint32_t _large_source_block_length = 0;
       uint32_t _small_source_block_length = 0;
+
+      // only for Raptor FEC
+      uint8_t _nof_sub_blocks = 0;
+      uint8_t _symbol_alignment = 0;
 
       char* _buffer = nullptr;
       bool _own_buffer = false;
@@ -162,5 +174,7 @@ namespace LibFlute {
       unsigned _access_count = 0;
 
       uint16_t _fdt_instance_id = 0;
+
+      bool _enable_md5_check = false;
   };
 };
