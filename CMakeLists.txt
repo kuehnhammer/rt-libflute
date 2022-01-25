@@ -63,17 +63,17 @@ target_link_libraries( flute
 
 if (ENABLE_RAPTOR10)
   add_definitions(-DENABLE_RAPTOR10)
-  add_subdirectory(lib/Raptor-Codes-rfc5053)
+  add_subdirectory(lib/raptor10)
   include_directories(
     SYSTEM
-    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
+    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
     )
   target_sources(flute
     PRIVATE
     src/File_FEC_Raptor10.cpp
     )
   link_directories(
-    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
+    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
     )
   target_link_libraries( flute
     LINK_PUBLIC

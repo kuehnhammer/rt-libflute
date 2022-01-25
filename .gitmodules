@@ -1,0 +1,3 @@
+[submodule "lib/raptor10"]
+	path = lib/raptor10
+	url = git@github.com:kuehnhammer/Raptor-Codes-rfc5053.git

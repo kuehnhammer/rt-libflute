@@ -127,11 +127,13 @@ LibFlute::File::~File()
 
 auto LibFlute::File::check_md5() -> void 
 {
-  unsigned char md5[MD5_DIGEST_LENGTH];
-  MD5((const unsigned char*)buffer(), length(), md5);
+  if (_complete && !_meta.content_md5.empty()) {
+    unsigned char md5[MD5_DIGEST_LENGTH];
+    MD5((const unsigned char*)buffer(), length(), md5);
 
-  auto content_md5 = base64_decode(_meta.content_md5);
-  if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
-    reset();
+    auto content_md5 = base64_decode(_meta.content_md5);
+    if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
+      reset();
+    }
   }
 }

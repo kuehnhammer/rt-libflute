@@ -154,8 +154,6 @@ auto LibFlute::File_FEC_Raptor10::put_symbol( const LibFlute::EncodingSymbol& sy
   source_block.raptor_enc_symbols->symbol.emplace_back(_meta.fec_oti.encoding_symbol_length);
   source_block.raptor_enc_symbols->symbol.back().data_reading( symbol.buffer() );
 
-      spdlog::debug("putting ESI {}, sz {}, sz {}", symbol.id(), source_block.raptor_enc_symbols->ESIs.size(), source_block.symbols.size());
-
   if (source_block.raptor_enc_symbols->ESIs.size() >= source_block.symbols.size()) {
     // attempt to decode
     try {
@@ -165,7 +163,6 @@ auto LibFlute::File_FEC_Raptor10::put_symbol( const LibFlute::EncodingSymbol& sy
 
       for (int i = 0; i < source_block.symbols.size(); i++) {
         auto& target_symbol = source_block.symbols[i];
-      spdlog::debug("copy {} bytes into sym {}",  target_symbol.length, i);
         memcpy(target_symbol.data, &(source.symbol[i].s[0]), target_symbol.length);
         target_symbol.complete = true;
       }
