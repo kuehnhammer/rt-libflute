@@ -18,6 +18,7 @@
 #include <iostream>
 #include <cmath>
 #include <arpa/inet.h>
+#include "spdlog/spdlog.h"
 #include "EncodingSymbol.h"
 
 auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len, const FecOti& fec_oti, ContentEncoding encoding) -> std::vector<EncodingSymbol> 
@@ -31,7 +32,7 @@ auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len,
   }
   
   if (fec_oti.encoding_id == FecScheme::CompactNoCode ||
-      fec_oti.encoding_id == FecScheme::Raptor) {
+      fec_oti.encoding_id == FecScheme::Raptor10) {
     source_block_number = ntohs(*(uint16_t*)encoded_data);
     encoded_data += 2;
     encoding_symbol_id = ntohs(*(uint16_t*)encoded_data);
@@ -57,7 +58,7 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   auto ptr = encoded_data;
   auto first_symbol = symbols.begin();
   if (fec_oti.encoding_id == FecScheme::CompactNoCode ||
-      fec_oti.encoding_id == FecScheme::Raptor) {
+      fec_oti.encoding_id == FecScheme::Raptor10) {
     *((uint16_t*)ptr) = htons(first_symbol->source_block_number());
     ptr += 2;
     *((uint16_t*)ptr) = htons(first_symbol->id());
@@ -68,11 +69,13 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   }
 
   for (const auto& symbol : symbols) {
+    spdlog::debug("syn len {}, data_len {}", symbol.len(), data_len);
     if (symbol.len() <= data_len) {
       auto symbol_len = symbol.copy_encoded(ptr, data_len);
       data_len -= symbol_len;
-      encoded_data += symbol_len;
+      ptr += symbol_len;
       len += symbol_len;
+    spdlog::debug("enc len {}, data_len {}, encoded_data {}, len {}", symbol_len, data_len, encoded_data, len);
     }
   }
   return len;
@@ -84,8 +87,8 @@ auto LibFlute::EncodingSymbol::decode_to(char* buffer, size_t max_length) const 
       memcpy(buffer, _encoded_data, _data_len);
       return true;
     }
-    return false;
   }
+  return false;
 }
 
 auto LibFlute::EncodingSymbol::copy_encoded(char* buffer, size_t max_length) const -> size_t {

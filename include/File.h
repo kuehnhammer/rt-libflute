@@ -22,33 +22,125 @@
 #include "FileDeliveryTable.h"
 #include "EncodingSymbol.h"
 
-#include "Array_Data_Types.h"
-
 namespace LibFlute {
   /**
    *  Represents a file being transmitted or received
    */
   class File {
     public:
-     /**
-      *  Create a file from an FDT entry (used for reception)
-      *
-      *  @param entry FDT entry
-      */
-      File(LibFlute::FileDeliveryTable::FileEntry entry);
+      /**
+       *  Create a file from an FDT entry (used for reception) - factory method
+       *
+       *  @param entry FDT entry
+       *  @param enable_md5 Enable md5sum verification
+       */
+      static std::shared_ptr<File> create_file(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5 = true);
 
-     /**
-      *  Create a file from the given parameters (used for transmission)
-      *
-      *  @param toi TOI of the file
-      *  @param content_location Content location URI to use
-      *  @param content_type MIME type
-      *  @param expires Expiry value (in seconds since the NTP epoch)
-      *  @param data Pointer to the data buffer
-      *  @param length Length of the buffer
-      *  @param copy_data Copy the buffer. If false (the default), the caller must ensure the buffer remains valid 
-      *                   while the file is being transmitted.
-      */
+      /**
+       *  Create a file from the given parameters (used for transmission)
+       *
+       *  @param toi TOI of the file
+       *  @param content_location Content location URI to use
+       *  @param content_type MIME type
+       *  @param expires Expiry value (in seconds since the NTP epoch)
+       *  @param data Pointer to the data buffer
+       *  @param length Length of the buffer
+       *  @param copy_data Copy the buffer. If false (the default), the caller must ensure the buffer remains valid 
+       *                   while the file is being transmitted.
+       */
+      static std::shared_ptr<File> create_file(uint32_t toi, 
+          FecOti fec_oti,
+          std::string content_location,
+          std::string content_type,
+          uint64_t expires,
+          char* data,
+          size_t length,
+          bool copy_data = false,
+          bool enable_md5 = true);
+
+      /**
+       *  Default destructor.
+       */
+      virtual ~File();
+
+
+      /**
+       *  Check if the file is complete
+       */
+      bool complete() const { return _complete; };
+
+      /**
+       *  Get the data buffer
+       */
+      char* buffer() const { return _buffer; };
+
+      /**
+       *  Get the data buffer length
+       */
+      size_t length() const { return _meta.content_length; };
+
+      /**
+       *  Get the FEC OTI values
+       */
+      const FecOti& fec_oti() const { return _meta.fec_oti; };
+
+      /**
+       *  Get the file metadata from its FDT entry
+       */
+      const LibFlute::FileDeliveryTable::FileEntry& meta() const { return _meta; };
+
+      /**
+       *  Timestamp of file reception
+       */
+      unsigned long received_at() const { return _received_at; };
+
+      /**
+       *  Log access to the file by incrementing a counter
+       */
+      void log_access() { _access_count++; };
+
+      /**
+       *  Get the access counter value
+       */
+      unsigned access_count() const { return _access_count; };
+
+      /**
+       *  Set the FDT instance ID
+       */
+      void set_fdt_instance_id( uint16_t id) { _fdt_instance_id = id; };
+
+      /**
+       *  Get the FDT instance ID
+       */
+      uint16_t fdt_instance_id() { return _fdt_instance_id; };
+
+
+      //
+      //  FEC-specific, to be imnplemented by derived classes
+      //  
+      
+      /**
+       *  Process the data from an incoming encoding symbol
+       */
+      virtual void put_symbol(const EncodingSymbol& symbol) = 0;
+
+      /**
+       *  Get the next encoding symbols that fit in max_size bytes
+       */
+      virtual std::vector<EncodingSymbol> get_next_symbols(size_t max_size) = 0;
+
+      /**
+       *  Mark encoding symbols as completed (transmitted)
+       */
+      virtual void mark_completed(const std::vector<EncodingSymbol>& symbols, bool success) = 0;
+
+      /**
+       *  Reset all source symbols to incomplete state
+       */
+      virtual void reset() = 0;
+
+    protected:
+      File(FileDeliveryTable::FileEntry entry, bool enable_md5);
       File(uint32_t toi, 
           FecOti fec_oti,
           std::string content_location,
@@ -56,115 +148,12 @@ namespace LibFlute {
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data = false);
+          bool copy_data,
+          bool enable_md5);
 
-     /**
-      *  Default destructor.
-      */
-      virtual ~File();
-
-     /**
-      *  Write the data from an encoding symbol into the appropriate place in the buffer
-      */
-      void put_symbol(const EncodingSymbol& symbol);
-
-     /**
-      *  Check if the file is complete
-      */
-      bool complete() const { return _complete; };
-
-     /**
-      *  Get the data buffer
-      */
-      char* buffer() const { return _buffer; };
-
-     /**
-      *  Get the data buffer length
-      */
-      size_t length() const { return _meta.content_length; };
-
-     /**
-      *  Get the FEC OTI values
-      */
-      const FecOti& fec_oti() const { return _meta.fec_oti; };
-
-     /**
-      *  Get the file metadata from its FDT entry
-      */
-      const LibFlute::FileDeliveryTable::FileEntry& meta() const { return _meta; };
-
-     /**
-      *  Timestamp of file reception
-      */
-      unsigned long received_at() const { return _received_at; };
-
-     /**
-      *  Log access to the file by incrementing a counter
-      */
-      void log_access() { _access_count++; };
-
-     /**
-      *  Get the access counter value
-      */
-      unsigned access_count() const { return _access_count; };
-
-     /**
-      *  Get the next encoding symbols that fit in max_size bytes
-      */
-      std::vector<EncodingSymbol> get_next_symbols(size_t max_size);
-
-     /**
-      *  Mark encoding symbols as completed
-      */
-      void mark_completed(const std::vector<EncodingSymbol>& symbols, bool success);
-
-     /**
-      *  Set the FDT instance ID
-      */
-      void set_fdt_instance_id( uint16_t id) { _fdt_instance_id = id; };
-
-     /**
-      *  Get the FDT instance ID
-      */
-      uint16_t fdt_instance_id() { return _fdt_instance_id; };
-
-    private:
-      void calculate_compactnocode_partitioning();
-      void calculate_raptor_partitioning();
-      void create_blocks();
-      void create_raptor_blocks();
-
-      struct SourceBlock {
-        bool complete = false;
-        struct Symbol {
-          char* data;
-          size_t length;
-          bool complete = false;
-          bool queued = false;
-        };
-        std::map<uint16_t, Symbol> symbols; 
-        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
-      };
-
-      void check_source_block_completion(SourceBlock& block);
-      void check_file_completion();
-
-      std::map<uint16_t, SourceBlock> _source_blocks; 
-      
+      void check_md5();
 
       bool _complete = false;;
-
-      uint32_t _nof_source_blocks = 0;
-
-      // only for Compact No-Code FEC
-      uint32_t _nof_source_symbols = 0;
-      uint32_t _nof_large_source_blocks = 0;
-      uint32_t _large_source_block_length = 0;
-      uint32_t _small_source_block_length = 0;
-
-      // only for Raptor FEC
-      uint8_t _nof_sub_blocks = 0;
-      uint8_t _symbol_alignment = 0;
 
       char* _buffer = nullptr;
       bool _own_buffer = false;
@@ -175,6 +164,6 @@ namespace LibFlute {
 
       uint16_t _fdt_instance_id = 0;
 
-      bool _enable_md5_check = false;
+      bool _enable_md5 = false;
   };
 };

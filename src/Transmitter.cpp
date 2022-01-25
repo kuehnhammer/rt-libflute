@@ -75,7 +75,8 @@ auto LibFlute::Transmitter::seconds_since_epoch() -> uint64_t
 auto LibFlute::Transmitter::send_fdt() -> void {
   _fdt->set_expires(seconds_since_epoch() + _fdt_repeat_interval * 2);
   auto fdt = _fdt->to_string();
-  auto file = std::make_shared<File>(
+  _fec_oti.encoding_id = FecScheme::CompactNoCode;
+  auto file = File::create_file(
         0,
         _fec_oti,
         "",
@@ -84,8 +85,10 @@ auto LibFlute::Transmitter::send_fdt() -> void {
         (char*)fdt.c_str(),
         fdt.length(),
         true);
-  file->set_fdt_instance_id( _fdt->instance_id() );
-  _files.insert_or_assign(0, file);
+  if (file) {
+    file->set_fdt_instance_id( _fdt->instance_id() );
+    _files.insert_or_assign(0, file);
+  }
 }
 
 auto LibFlute::Transmitter::send(
@@ -93,13 +96,15 @@ auto LibFlute::Transmitter::send(
     const std::string& content_type,
     uint32_t expires,
     char* data,
-    size_t length) -> uint16_t 
+    size_t length,
+    FecScheme fec_scheme) -> uint16_t 
 {
   auto toi = _toi;
   _toi++;
   if (_toi == 0) _toi = 1; // clamp to >= 1 in case it wraps
 
-  auto file = std::make_shared<File>(
+  _fec_oti.encoding_id = fec_scheme;
+  auto file = File::create_file(
         toi,
         _fec_oti,
         content_location,
@@ -108,9 +113,11 @@ auto LibFlute::Transmitter::send(
         data,
         length);
 
-  _fdt->add(file->meta());
-  send_fdt();
-  _files.insert({toi, file});
+  if (file) {
+    _fdt->add(file->meta());
+    send_fdt();
+    _files.insert({toi, file});
+  }
   return toi;
 }
 

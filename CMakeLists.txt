@@ -5,6 +5,8 @@ project (libflute VERSION 0.9.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+option(ENABLE_RAPTOR10    "Enable support for Raptor10 FEC"     OFF)
+
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror -g3")
 set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")
 
@@ -15,8 +17,8 @@ find_package(OpenSSL REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
 
+
 add_subdirectory(examples)
-add_subdirectory(lib/Raptor-Codes-rfc5053)
 
 include_directories(
     "${PROJECT_BINARY_DIR}"
@@ -24,23 +26,20 @@ include_directories(
 
     SYSTEM
     ${PROJECT_SOURCE_DIR}/utils
-    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
     ${SPDLOG_INCLUDEDIR}
     PkgConfig::NETLINK
     )
 
 configure_file("include/Version.h.in" "Version.h")
 
-link_directories(
-    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
-    )
 
 set(CMAKE_CXX_CLANG_TIDY clang-tidy --format-style=google --checks=clang-diagnostic-*,clang-analyzer-*,-*,bugprone*,modernize*,performance*,-modernize-use-trailing-return-type,-modernize-avoid-c-arrays,-modernize-avoid-bind)
 
 add_library(flute "")
 target_sources(flute
   PRIVATE
-  src/Receiver.cpp src/Transmitter.cpp src/AlcPacket.cpp src/File.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp
+    src/Receiver.cpp src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp
+    src/File.cpp src/File_FEC_CompactNoCode.cpp
     utils/base64.cpp
   PUBLIC
     include/Receiver.h include/Transmitter.h include/File.h
@@ -58,8 +57,26 @@ target_link_libraries( flute
     z
     pthread
     crypto
-    raptor
     PkgConfig::TINYXML
     PkgConfig::NETLINK
 )
 
+if (ENABLE_RAPTOR10)
+  add_definitions(-DENABLE_RAPTOR10)
+  add_subdirectory(lib/Raptor-Codes-rfc5053)
+  include_directories(
+    SYSTEM
+    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
+    )
+  target_sources(flute
+    PRIVATE
+    src/File_FEC_Raptor10.cpp
+    )
+  link_directories(
+    ${PROJECT_SOURCE_DIR}/lib/Raptor-Codes-rfc5053/src/libraptor
+    )
+  target_link_libraries( flute
+    LINK_PUBLIC
+    raptor
+    )
+endif (ENABLE_RAPTOR10)

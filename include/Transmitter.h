@@ -23,6 +23,7 @@
 #include "File.h"
 #include "AlcPacket.h"
 #include "FileDeliveryTable.h"
+#include "flute_types.h"
 
 namespace LibFlute {
   /**
@@ -76,6 +77,7 @@ namespace LibFlute {
       *  @param expires Expiry timestamp (based on NTP epoch)
       *  @param data Pointer to the data buffer (managed by caller)
       *  @param length Length of the data buffer (in bytes)
+      *  @param fec_scheme FEC scheme to use (default: Compact No-Code)
       *
       *  @return TOI of the file
       */
@@ -83,7 +85,8 @@ namespace LibFlute {
           const std::string& content_type,
           uint32_t expires,
           char* data,
-          size_t length);
+          size_t length,
+          FecScheme fec_scheme = FecScheme::CompactNoCode);
 
      /**
       *  Convenience function to get the current timestamp for expiry calculation

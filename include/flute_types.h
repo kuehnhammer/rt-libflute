@@ -39,11 +39,11 @@ namespace LibFlute {
   };
 
   /**
-   *  Error correction schemes 
+   *  Forward Error Correction schemes 
    */
   enum class FecScheme {
     CompactNoCode,
-    Raptor
+    Raptor10
   };
 
   /**

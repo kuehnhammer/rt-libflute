@@ -43,10 +43,12 @@ namespace LibFlute {
       *  @param port Target port 
       *  @param tsi TSI value of the session 
       *  @param io_service Boost io_service to run the socket operations in (must be provided by the caller)
+      *  @param enable_md5 Enable checking of MD5 sums for received files
       */
       Receiver( const std::string& iface, const std::string& address, 
           short port, uint64_t tsi,
-          boost::asio::io_service& io_service);
+          boost::asio::io_service& io_service,
+          bool enable_md5 = true);
 
      /**
       *  Default destructor.
@@ -99,5 +101,6 @@ namespace LibFlute {
       completion_callback_t _completion_cb = nullptr;
 
       bool _running = true;
+      bool _enable_md5 = true;
   };
 };

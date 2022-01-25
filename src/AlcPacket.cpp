@@ -84,7 +84,7 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
   if (_lct_header.codepoint == 0) {
     _fec_oti.encoding_id = FecScheme::CompactNoCode;
   } else if (_lct_header.codepoint == 1) {
-    _fec_oti.encoding_id = FecScheme::Raptor;
+    _fec_oti.encoding_id = FecScheme::Raptor10;
   } else {
     throw "Unsupported FEC scheme";
   }
@@ -160,7 +160,7 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
 }
 
 LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_oti, const std::vector<LibFlute::EncodingSymbol>& symbols, size_t max_size, uint32_t fdt_instance_id)
-  : _fec_oti(fec_oti)
+  : _fec_oti(std::move(fec_oti))
 {
   auto lct_header_len = 3;
   if (toi == 0) { // Add extensions for FDT
@@ -179,7 +179,7 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
   lct_header->half_word_flag = 1;
   if (fec_oti.encoding_id == LibFlute::FecScheme::CompactNoCode) {
     lct_header->codepoint = 0;
-  } else if (fec_oti.encoding_id == LibFlute::FecScheme::Raptor) {
+  } else if (fec_oti.encoding_id == LibFlute::FecScheme::Raptor10) {
     lct_header->codepoint = 1;
   } else {
     throw "Unsupported FEC scheme";

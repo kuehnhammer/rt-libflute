@@ -23,10 +23,11 @@
 
 LibFlute::Receiver::Receiver ( const std::string& iface, const std::string& address,
     short port, uint64_t tsi, 
-    boost::asio::io_service& io_service)
+    boost::asio::io_service& io_service, bool enable_md5)
     : _socket(io_service)
     , _tsi(tsi)
     , _mcast_address(address)
+    , _enable_md5(enable_md5)
 {
     boost::asio::ip::udp::endpoint listen_endpoint(
         boost::asio::ip::address::from_string(iface), port);
@@ -72,7 +73,11 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
       if (alc.toi() == 0 && (!_fdt || _fdt->instance_id() != alc.fdt_instance_id())) {
         if (_files.find(alc.toi()) == _files.end()) {
           FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti()};
-          _files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
+          //_files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
+          auto file = LibFlute::File::create_file(fe, _enable_md5);
+          if (file) { 
+            _files.emplace(alc.toi(), file);
+          }
         }
       }
 
@@ -86,6 +91,9 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
         for (const auto& symbol : encoding_symbols) {
           spdlog::debug("received TOI {} SBN {} ID {}", alc.toi(), symbol.source_block_number(), symbol.id() );
           _files[alc.toi()]->put_symbol(symbol);
+          if (_files[alc.toi()]->complete()) {
+            break;
+          }
         }
 
         auto file = _files[alc.toi()].get();
@@ -109,7 +117,7 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
           }
 
           if (alc.toi() == 0) { // parse complete FDT
-            _fdt = std::make_unique<LibFlute::FileDeliveryTable>(
+            _fdt = std::make_unique<FileDeliveryTable>(
                 alc.fdt_instance_id(), _files[alc.toi()]->buffer(), _files[alc.toi()]->length());
 
             _files.erase(alc.toi());
@@ -117,7 +125,10 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
               // automatically receive all files in the FDT
               if (_files.find(file_entry.toi) == _files.end()) {
                 spdlog::debug("Starting reception for file with TOI {}", file_entry.toi);
-                _files.emplace(file_entry.toi, std::make_shared<LibFlute::File>(file_entry));
+                auto file = LibFlute::File::create_file(file_entry, _enable_md5);
+                if (file) { 
+                  _files.emplace(file_entry.toi, file);
+                }
               }
             }
           }

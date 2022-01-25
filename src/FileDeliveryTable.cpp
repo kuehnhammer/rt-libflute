@@ -23,7 +23,7 @@
 
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_oti)
   : _instance_id( instance_id )
-  , _global_fec_oti( fec_oti )
+  , _global_fec_oti( std::move(fec_oti) )
 {
 }
 
@@ -36,7 +36,7 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   _expires = std::stoull(fdt_instance->Attribute("Expires"));
 
   spdlog::debug("Received new FDT with instance ID {}", instance_id);
-  spdlog::trace("FDT content:\n{}", buffer);
+  spdlog::trace("FDT content:\n{}", std::string(buffer, len));
 
   uint8_t def_fec_encoding_id = 0;
   auto val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
@@ -172,16 +172,23 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   root->SetAttribute("Expires", std::to_string(_expires).c_str());
   root->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)_global_fec_oti.encoding_id);
   root->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", (unsigned)_global_fec_oti.max_source_block_length);
-  root->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)_global_fec_oti.encoding_symbol_length);
   root->SetAttribute("xmlns:mbms2007", "urn:3GPP:metadata:2007:MBMS:FLUTE:FDT");
   doc.InsertEndChild(root);
 
   for (const auto& file : _file_entries) {
     auto f = doc.NewElement("File");
     f->SetAttribute("TOI", file.toi);
+    f->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)file.fec_oti.encoding_symbol_length);
+    f->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)file.fec_oti.encoding_id);
+    if (file.fec_oti.scheme_specific_info.size() > 0) {
+      auto enc = base64_encode(file.fec_oti.scheme_specific_info);
+      f->SetAttribute("FEC-OTI-Scheme-Specific-Info", enc.c_str());
+    }
     f->SetAttribute("Content-Location", file.content_location.c_str());
     f->SetAttribute("Content-Length", file.content_length);
-    f->SetAttribute("Transfer-Length", (unsigned)file.fec_oti.transfer_length);
+    if (file.fec_oti.transfer_length > 0) {
+      f->SetAttribute("Transfer-Length", (unsigned)file.fec_oti.transfer_length);
+    }
     f->SetAttribute("Content-MD5", file.content_md5.c_str());
     f->SetAttribute("Content-Type", file.content_type.c_str());
     auto cc = doc.NewElement("mbms2007:Cache-Control");
