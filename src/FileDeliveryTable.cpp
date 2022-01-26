@@ -56,6 +56,12 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     def_fec_encoding_symbol_length = strtoul(val, nullptr, 0);
   }
 
+  std::string def_scheme_specific_info = "";
+  val = fdt_instance->Attribute("FEC-OTI-Scheme-Specific-Info");
+  if (val != nullptr) {
+    def_scheme_specific_info = base64_decode((const std::string&)val);
+  }
+
   for (auto file = fdt_instance->FirstChildElement("File"); 
       file != nullptr; file = file->NextSiblingElement("File")) {
 
@@ -111,10 +117,10 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       encoding_symbol_length = strtoul(val, nullptr, 0);
     }
 
-    std::string scheme_specific_info = "";
-    auto ssi = file->Attribute("FEC-OTI-Scheme-Specific-Info");
-    if (ssi) {
-      scheme_specific_info = base64_decode((const std::string&)ssi);
+    std::string scheme_specific_info = def_scheme_specific_info;
+    val = file->Attribute("FEC-OTI-Scheme-Specific-Info");
+    if (val != nullptr) {
+      scheme_specific_info = base64_decode((const std::string&)val);
     }
 
     uint32_t expires = 0;
