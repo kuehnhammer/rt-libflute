@@ -69,12 +69,17 @@ namespace LibFlute {
      /**
       *  Decode to a buffer
       */
-      void decode_to(char* buffer, size_t max_length) const;
+      bool decode_to(char* buffer, size_t max_length) const;
 
      /**
       *  Encode to a buffer
       */
-      size_t encode_to(char* buffer, size_t max_length) const;
+      size_t copy_encoded(char* buffer, size_t max_length) const;
+
+     /**
+      *  Get a pointer to the encoded data buffer
+      */
+      uint8_t* buffer() const { return (uint8_t*)_encoded_data; };
 
      /**
       *  Get the data length

@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <libconfig.h++>
 #include <boost/asio.hpp>
+#include <boost/asio/signal_set.hpp>
 
 #include "spdlog/async.h"
 #include "spdlog/spdlog.h"
@@ -38,9 +39,7 @@ using libconfig::Config;
 using libconfig::FileIOException;
 using libconfig::ParseException;
 
-using std::placeholders::_1;
-using std::placeholders::_2;
-using std::placeholders::_3;
+using namespace boost::placeholders;
 
 static void print_version(FILE *stream, struct argp_state *state);
 void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
@@ -51,7 +50,9 @@ static struct argp_option options[] = {  // NOLINT
     {"interface", 'i', "IF", 0, "IP address of the interface to bind flute receivers to (default: 0.0.0.0)", 0},
     {"target", 'm', "IP", 0, "Multicast address to receive on (default: 238.1.1.95)", 0},
     {"port", 'p', "PORT", 0, "Multicast port (default: 40085)", 0},
+    {"tsi", 't', "TSI", 0, "TSI to receive (default: 0)", 0},
     {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP decryption of packets, provide a hex-encoded AES key here", 0},
+    {"disable-md5",  '5', nullptr, 0,  "Disable MD5 verification" },
     {"log-level", 'l', "LEVEL", 0,
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
      "critical, 6 = none. Default: 2.",
@@ -68,6 +69,8 @@ struct ft_arguments {
   const char *aes_key = {};
   unsigned short mcast_port = 40085;
   unsigned log_level = 2;        /**< log level */
+  unsigned tsi = 0;
+  bool md5_enabled = true;
   char **files;
 };
 
@@ -83,6 +86,9 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
     case 'i':
       arguments->flute_interface = arg;
       break;
+    case '5':
+      arguments->md5_enabled = false;
+      break;
     case 'k':
       arguments->aes_key = arg;
       arguments->enable_ipsec = true;
@@ -92,6 +98,9 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
       break;
     case 'l':
       arguments->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10));
+      break;
+    case 't':
+      arguments->tsi = static_cast<unsigned>(strtoul(arg, nullptr, 10));
       break;
     default:
       return ARGP_ERR_UNKNOWN;
@@ -149,8 +158,9 @@ auto main(int argc, char **argv) -> int {
         arguments.flute_interface,
         arguments.mcast_target,
         (short)arguments.mcast_port,
-        16,
-        io);
+        arguments.tsi,
+        io,
+        arguments.md5_enabled);
 
     // Configure IPSEC, if enabled
     if (arguments.enable_ipsec) 
@@ -162,10 +172,15 @@ auto main(int argc, char **argv) -> int {
         [](std::shared_ptr<LibFlute::File> file) { //NOLINT
         spdlog::info("{} (TOI {}) has been received",
             file->meta().content_location, file->meta().toi);
-        FILE* fd = fopen(file->meta().content_location.c_str(), "wb");
-        fwrite(file->buffer(), 1, file->length(), fd);
-        fclose(fd);
+  //      FILE* fd = fopen(file->meta().content_location.c_str(), "wb");
+  //      fwrite(file->buffer(), 1, file->length(), fd);
+  //      fclose(fd);
         });
+
+    
+    boost::asio::signal_set signals(io, SIGINT, SIGTERM);
+    signals.async_wait(
+        boost::bind(&boost::asio::io_service::stop, &io)); // NOLINT
 
     // Start the IO service
     io.run();
