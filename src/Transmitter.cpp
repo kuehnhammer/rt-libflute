@@ -22,7 +22,7 @@
 #include "Transmitter.h"
 #include "IpSec.h"
 LibFlute::Transmitter::Transmitter ( const std::string& address,
-    short port, uint64_t tsi, unsigned short mtu, uint32_t rate_limit,
+    short port, uint64_t tsi, unsigned short mtu, uint32_t rate_limit, //NOLINT
     boost::asio::io_service& io_service)
     : _endpoint(boost::asio::ip::address::from_string(address), port)
     , _socket(io_service, _endpoint.protocol())
@@ -73,7 +73,7 @@ auto LibFlute::Transmitter::seconds_since_epoch() -> uint64_t
 }
 
 auto LibFlute::Transmitter::send_fdt() -> void {
-  _fdt->set_expires(seconds_since_epoch() + _fdt_repeat_interval * 2);
+  _fdt->set_expires(seconds_since_epoch() + static_cast<unsigned long>(_fdt_repeat_interval) * 2);
   auto fdt = _fdt->to_string();
   _fec_oti.encoding_id = FecScheme::CompactNoCode;
   auto file = File::create_file(
@@ -81,7 +81,7 @@ auto LibFlute::Transmitter::send_fdt() -> void {
         _fec_oti,
         "",
         "",
-        seconds_since_epoch() + _fdt_repeat_interval * 2,
+        seconds_since_epoch() + static_cast<unsigned long>(_fdt_repeat_interval) * 2,
         (char*)fdt.c_str(),
         fdt.length(),
         true);

@@ -142,14 +142,14 @@ std::string base64_encode(unsigned char const* bytes_to_encode, size_t in_len, b
            }
            else {
               ret.push_back(base64_chars_[(bytes_to_encode[pos + 1] & 0x0f) << 2]);
-              ret.push_back(trailing_char);
+              ret.push_back(static_cast<char>(trailing_char));
            }
         }
         else {
 
             ret.push_back(base64_chars_[(bytes_to_encode[pos + 0] & 0x03) << 4]);
-            ret.push_back(trailing_char);
-            ret.push_back(trailing_char);
+            ret.push_back(static_cast<char>(trailing_char));
+            ret.push_back(static_cast<char>(trailing_char));
         }
 
         pos += 3;
@@ -166,7 +166,7 @@ static std::string decode(String encoded_string, bool remove_linebreaks) {
  // or std::string_view (requires at least C++17)
  //
 
-    if (encoded_string.empty()) return std::string();
+    if (encoded_string.empty()) return {};
 
     if (remove_linebreaks) {
 
