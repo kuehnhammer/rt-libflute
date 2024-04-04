@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <arpa/inet.h>
@@ -78,7 +77,6 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
         break;
       default:
         throw "TOI fields over 64 bits in length are not supported";
-        break;
   } 
 
   if (_lct_header.codepoint == 0) {
@@ -221,15 +219,6 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     *((uint32_t*)hdr_ptr) = htonl(_fec_oti.max_source_block_length);
     hdr_ptr += 4;
   }
-
-
-
-  /*
-  memset(&_lct_header, 0, sizeof(_lct_header));
-  _lct_header.version = 1;
-  _lct_header.half_word_flag = 1;
-  */
-
 }
 
 LibFlute::AlcPacket::~AlcPacket()
