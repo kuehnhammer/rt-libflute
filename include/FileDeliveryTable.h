@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <unique_ptr>
 #include "flute_types.h"
 
 namespace LibFlute {
@@ -46,7 +47,7 @@ namespace LibFlute {
      /**
       *  Default destructor.
       */
-      virtual ~FileDeliveryTable() {};
+      virtual ~FileDeliveryTable();
 
      /**
       *  Get the FDT instance ID
@@ -64,6 +65,7 @@ namespace LibFlute {
         std::string content_type;
         uint64_t expires;
         FecOti fec_oti;
+        std::unique_ptr<FecTransformer> fec_transformer = {};
       };
 
      /**
@@ -74,7 +76,7 @@ namespace LibFlute {
      /**
       *  Add a file entry
       */
-      void add(const FileEntry& entry);
+      void add(FileEntry& entry);
 
      /**
       *  Remove a file entry
@@ -96,6 +98,7 @@ namespace LibFlute {
 
       std::vector<FileEntry> _file_entries;
       FecOti _global_fec_oti;
+      FecTransformer *_fdt_fec_transformer = 0;
 
       uint64_t _expires;
   };

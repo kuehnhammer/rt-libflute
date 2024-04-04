@@ -21,6 +21,7 @@
 #include <mutex>
 #include "File.h"
 #include "FileDeliveryTable.h"
+#include "flute_types.h"
 
 namespace LibFlute {
   /**

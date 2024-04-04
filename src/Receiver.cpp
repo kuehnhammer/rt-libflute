@@ -57,7 +57,12 @@ auto LibFlute::Receiver::enable_ipsec(uint32_t spi, const std::string& key) -> v
 auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& error,
     size_t bytes_recvd) -> void
 {
-  if (!_running) return;
+  if (!_running) {
+#ifdef SIMULATED_PKT_LOSS
+    spdlog::warn("Stopping reception: total packets dropped {}", packets_dropped);
+#endif // SIMULATED_PKT_LOSS
+    return;
+  }
 
   if (!error)
   {
@@ -75,7 +80,6 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
       if (alc.toi() == 0 && (!_fdt || _fdt->instance_id() != alc.fdt_instance_id())) {
         if (_files.find(alc.toi()) == _files.end()) {
           FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti()};
-          //_files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
           auto file = LibFlute::File::create_file(fe, _enable_md5);
           if (file) { 
             _files.emplace(alc.toi(), file);
@@ -91,6 +95,7 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
             alc.content_encoding());
 
         for (const auto& symbol : encoding_symbols) {
+
           spdlog::debug("received TOI {} SBN {} ID {}", alc.toi(), symbol.source_block_number(), symbol.id() );
           _files[alc.toi()]->put_symbol(symbol);
           if (_files[alc.toi()]->complete()) {
@@ -100,11 +105,15 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
 
         auto file = _files[alc.toi()].get();
         if (_files[alc.toi()]->complete()) {
-          for (auto it = _files.cbegin(); it != _files.cend();)
+          for (auto it = _files.begin(); it != _files.end();)
           {
             if (it->second.get() != file && it->second->meta().content_location == file->meta().content_location)
             {
               spdlog::debug("Replacing file with TOI {}", it->first);
+              if (it->second.get()->meta().fec_transformer){
+                delete it->second.get()->meta().fec_transformer;
+                it->second.get()->meta().fec_transformer = 0;
+              }
               it = _files.erase(it);
             }
             else
@@ -116,6 +125,10 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
           spdlog::debug("File with TOI {} completed", alc.toi());
           if (alc.toi() != 0 && _completion_cb) {
             _completion_cb(_files[alc.toi()]);
+            if (_files[alc.toi()]->meta().fec_transformer){
+              delete _files[alc.toi()]->meta().fec_transformer;
+              _files[alc.toi()]->meta().fec_transformer = 0;
+            }
             _files.erase(alc.toi());
           }
 
@@ -171,6 +184,10 @@ auto LibFlute::Receiver::remove_expired_files(unsigned max_age) -> void
   {
     auto age = time(nullptr) - it->second->received_at();
     if ( it->second->meta().content_location != "bootstrap.multipart"  && age > max_age) {
+      if (it->second.get()->meta().fec_transformer){
+        delete it->second.get()->meta().fec_transformer;
+        it->second.get()->meta().fec_transformer = 0;
+      }
       it = _files.erase(it);
     } else {
       ++it;
@@ -184,6 +201,10 @@ auto LibFlute::Receiver::remove_file_with_content_location(const std::string& cl
   for (auto it = _files.cbegin(); it != _files.cend();)
   {
     if ( it->second->meta().content_location == cl) {
+      if (it->second.get()->meta().fec_transformer){
+        delete it->second.get()->meta().fec_transformer;
+        it->second.get()->meta().fec_transformer = 0;
+      }
       it = _files.erase(it);
     } else {
       ++it;

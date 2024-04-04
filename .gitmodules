@@ -1,3 +1,3 @@
-[submodule "lib/raptor10"]
-	path = lib/raptor10
-	url = ../Raptor-Codes-rfc5053.git
+[submodule "raptor"]
+	path = lib/raptor
+	url = https://github.com/SteezyE/raptor.git

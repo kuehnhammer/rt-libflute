@@ -33,6 +33,7 @@
 #include "Version.h"
 #include "Receiver.h"
 #include "File.h"
+#include "flute_types.h"
 
 
 using libconfig::Config;
@@ -57,6 +58,8 @@ static struct argp_option options[] = {  // NOLINT
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
      "critical, 6 = none. Default: 2.",
      0},
+    {"download-dir", 'd', "Download directory", 0 , "Directory in which to store downloaded files, defaults to the current directory otherwise", 0},
+    {"num-files", 'n', "Stop Receiving after n files", 0, "Stop the reception after n files have been received (default is to never stop)", 0},
     {nullptr, 0, nullptr, 0, nullptr, 0}};
 
 /**
@@ -71,6 +74,8 @@ struct ft_arguments {
   unsigned log_level = 2;        /**< log level */
   unsigned tsi = 0;
   bool md5_enabled = true;
+  char *download_dir = nullptr;
+  unsigned nfiles = 0;        /**< log level */
   char **files;
 };
 
@@ -101,6 +106,11 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
       break;
     case 't':
       arguments->tsi = static_cast<unsigned>(strtoul(arg, nullptr, 10));
+    case 'd':
+      arguments->download_dir = arg;
+      break;
+    case 'n':
+      arguments->nfiles = static_cast<unsigned>(strtoul(arg, nullptr, 10));
       break;
     default:
       return ARGP_ERR_UNKNOWN;
@@ -169,12 +179,33 @@ auto main(int argc, char **argv) -> int {
     }
 
     receiver.register_completion_callback(
-        [](std::shared_ptr<LibFlute::File> file) { //NOLINT
+        [&](std::shared_ptr<LibFlute::File> file) { //NOLINT
         spdlog::info("{} (TOI {}) has been received",
             file->meta().content_location, file->meta().toi);
-  //      FILE* fd = fopen(file->meta().content_location.c_str(), "wb");
-  //      fwrite(file->buffer(), 1, file->length(), fd);
-  //      fclose(fd);
+        char *buf = (char*) calloc(256,1);
+        char *fname = (char*) strrchr(file->meta().content_location.c_str(),'/');
+        if(!fname){
+          fname = (char*) file->meta().content_location.c_str();
+        } else {
+          fname++;
+        }
+        if (arguments.download_dir) {
+          snprintf(buf,256,"%s/%s",arguments.download_dir, fname);
+        } else {
+          snprintf(buf,256,"flute_download_%d-%s",file->meta().toi, fname);
+        }
+        FILE* fd = fopen(buf, "wb");
+        if (fd) {
+          fwrite(file->buffer(), 1, file->length(), fd);
+          fclose(fd);
+        } else {
+          spdlog::error("Error opening file {} to store received object",buf);
+        }
+        free(buf);
+        if (file->meta().toi == arguments.nfiles) {
+          spdlog::warn("{} file(s) received. Stopping reception",arguments.nfiles);
+          receiver.stop();
+        }
         });
 
     
@@ -185,7 +216,7 @@ auto main(int argc, char **argv) -> int {
     // Start the IO service
     io.run();
   } catch (std::exception ex ) {
-    spdlog::error("Exiting on unhandled exception: %s", ex.what());
+    spdlog::error("Exiting on unhandled exception: {}", ex.what());
   }
 
 exit:
