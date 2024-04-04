@@ -13,11 +13,13 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstring>
-#include <iostream>
-#include <arpa/inet.h>
 #include "AlcPacket.h"
-#include "spdlog/spdlog.h"
+#include <netinet/in.h>      // for ntohl, htons, ntohs, htonl
+#include <stdlib.h>          // for calloc, free
+#include <cstring>           // for memcpy
+#include <utility>           // for move
+#include "EncodingSymbol.h"  // for EncodingSymbol
+#include "spdlog/spdlog.h"   // for warn
 
 LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
 {

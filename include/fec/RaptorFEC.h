@@ -15,16 +15,12 @@
 //
 #pragma once
 
-#include <stddef.h>
-#include <stdint.h>
-#include <map>
-#include "tinyxml2.h"
-#include "raptor.h"
-#include "flute_types.h"
-#include "fec/FecTransformer.h"
+#include <cstdint>              // for uint16_t, uint32_t
+#include <map>                   // for map
+#include "fec/FecTransformer.h"  // for FecTransformer
+#include "flute_types.h"         // for SourceBlock, Symbol
+namespace tinyxml2 { class XMLElement; }
 
-
-#include <string>
 namespace LibFlute {
   class RaptorFEC : public FecTransformer {
 

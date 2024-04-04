@@ -13,20 +13,21 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <string>
-#include <cstring>
-#include <iostream>
-#include "spdlog/spdlog.h"
-#include <netlink/netlink.h>
-#include <netlink/attr.h>
-#include <netlink/msg.h>
-#include <linux/rtnetlink.h>
-#include <linux/in.h>
-#include <linux/xfrm.h>
-#include <linux/ipsec.h>
-#include <arpa/inet.h>
+
 #include "IpSec.h"
-#include <boost/algorithm/hex.hpp>
+#include <arpa/inet.h>        // for inet_addr
+#include <linux/netlink.h>    // for NETLINK_XFRM, NLMSG_ALIGNTO
+#include <linux/xfrm.h>       // for xfrm_usersa_info, xfrm_user_tmpl, xfrm_...
+#include <netinet/in.h>       // for htonl, INADDR_ANY, IPPROTO_ESP
+#include <netlink/attr.h>     // for nla_put
+#include <netlink/msg.h>      // for nlmsg_alloc_simple, nlmsg_append, nlmsg...
+#include <netlink/netlink.h>  // for nl_connect, nl_send_auto
+#include <netlink/socket.h>   // for nl_socket_alloc
+#include <stdlib.h>           // for strtol
+#include <sys/socket.h>       // for AF_INET
+#include <cstring>            // for memcpy, strcpy
+#include <string>             // for string, basic_string
+#include <vector>             // for vector
 
 namespace LibFlute::IpSec {
   void configure_policy(uint32_t spi, const std::string& dest_address, Direction direction)

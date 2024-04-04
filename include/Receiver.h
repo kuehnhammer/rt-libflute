@@ -14,14 +14,19 @@
 // under the License.
 //
 #pragma once
-#include <boost/asio.hpp>
-#include <boost/bind/bind.hpp>
-#include <string>
-#include <map>
-#include <mutex>
-#include "File.h"
-#include "FileDeliveryTable.h"
-#include "flute_types.h"
+
+#include <stddef.h>                   // for size_t
+#include <stdint.h>                   // for uint64_t, uint32_t
+#include <boost/asio.hpp>  // for io_service
+#include <functional>                 // for function
+#include <map>                        // for map
+#include <memory>                     // for shared_ptr, unique_ptr
+#include <mutex>                      // for mutex
+#include <string>                     // for string
+#include <vector>                     // for vector
+#include "FileDeliveryTable.h"        // for FileDeliveryTable
+namespace LibFlute { class File; }
+namespace boost::system { class error_code; }
 
 namespace LibFlute {
   /**

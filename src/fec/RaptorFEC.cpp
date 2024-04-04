@@ -15,8 +15,19 @@
 //
 
 #include "fec/RaptorFEC.h"
-#include <cmath>
-#include "spdlog/spdlog.h"
+#include <assert.h>         // for assert
+#include <stddef.h>         // for NULL
+#include <stdlib.h>         // for strtoul, malloc, calloc
+#include <string.h>         // for memcpy
+#include <tinyxml2.h>       // for XMLElement
+#include <algorithm>        // for all_of, for_each
+#include <cmath>            // for ceil, fmin, floor
+#include <cstdint>          // for uint16_t
+#include <exception>        // for exception
+#include <stdexcept>        // for invalid_argument
+#include <utility>          // for pair
+#include "raptor.h"         // for create_encoder_context, free_LT_packet
+#include "spdlog/spdlog.h"  // for debug, error, warn
 
 LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_payload) 
     : F(transfer_length)

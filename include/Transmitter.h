@@ -14,16 +14,19 @@
 // under the License.
 //
 #pragma once
+
+#include <stddef.h>                       // for size_t
+#include <stdint.h>                       // for uint32_t, uint16_t, uint64_t
 #include <boost/asio.hpp>
-#include <boost/bind/bind.hpp>
-#include <queue>
-#include <string>
-#include <map>
-#include <mutex>
-#include "File.h"
-#include "AlcPacket.h"
-#include "FileDeliveryTable.h"
-#include "flute_types.h"
+#include <functional>                     // for function
+#include <map>                            // for map
+#include <memory>                         // for shared_ptr, unique_ptr
+#include <mutex>                          // for mutex
+#include <string>                         // for string
+#include "flute_types.h"                  // for FecScheme, FecScheme::Compa...
+namespace LibFlute { class File; }
+namespace LibFlute { class FileDeliveryTable; }
+namespace boost::system { class error_code; }
 
 namespace LibFlute {
   /**
@@ -111,8 +114,8 @@ namespace LibFlute {
       void file_transmitted(uint32_t toi);
 
       void handle_send_to(const boost::system::error_code& error);
-      boost::asio::ip::udp::socket _socket;
       boost::asio::ip::udp::endpoint _endpoint;
+      boost::asio::ip::udp::socket _socket;
       boost::asio::io_service& _io_service;
       boost::asio::deadline_timer _send_timer;
       boost::asio::deadline_timer _fdt_timer;

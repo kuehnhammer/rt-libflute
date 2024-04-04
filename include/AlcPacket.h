@@ -14,11 +14,12 @@
 // under the License.
 //
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
-#include <vector>
-#include "flute_types.h"
-#include "EncodingSymbol.h"
+
+#include <cstddef>       // for size_t
+#include <cstdint>       // for uint8_t, uint32_t, uint64_t, uint16_t
+#include <vector>         // for vector
+#include "flute_types.h"  // for ContentEncoding, FecOti, ContentEncoding::NONE
+namespace LibFlute { class EncodingSymbol; }
 
 namespace LibFlute {
   /**

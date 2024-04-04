@@ -14,10 +14,12 @@
 // under the License.
 //
 #include "FileDeliveryTable.h"
-#include "tinyxml2.h"
-#include <iostream>
-#include <string>
-#include "spdlog/spdlog.h"
+#include <stdlib.h>         // for strtoul, strtoull
+#include <exception>        // for exception
+#include <string>           // for string, to_string, stoull
+#include <utility>          // for move
+#include "spdlog/spdlog.h"  // for debug
+#include "tinyxml2.h"       // for XMLElement, XMLDocument, XMLPrinter, COLL...
 #ifdef RAPTOR_ENABLED
 #include "fec/RaptorFEC.h"
 #endif

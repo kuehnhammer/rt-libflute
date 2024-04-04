@@ -13,26 +13,29 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstdio>
-#include <iostream>
-#include <argp.h>
-#include <cstdlib>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fstream>
-#include <string>
-#include <filesystem>
-#include <libconfig.h++>
+
+#include <argp.h>                          // for argp_state, argp_parse
+#include <fcntl.h>                         // for open, O_RDONLY
+#include <spdlog/common.h>                 // for level_enum
+#include <stdint.h>                        // for uint32_t
+#include <sys/mman.h>                      // for mmap, munmap, MAP_PRIVATE
+#include <sys/stat.h>                      // for stat, fstat
+#include <syslog.h>                        // for LOG_CONS, LOG_PERROR, LOG_PID
+#include <unistd.h>                        // for close
 #include <boost/asio.hpp>
-
-#include "spdlog/async.h"
-#include "spdlog/spdlog.h"
-#include "spdlog/sinks/syslog_sink.h"
-
-#include "Version.h"
-#include "Transmitter.h"
-#include "flute_types.h"
-
+#include <cstdio>                          // for FILE, fprintf, size_t
+#include <cstdlib>                         // for strtoul
+#include <exception>                       // for exception
+#include <string>                          // for allocator, to_string, string
+#include <vector>                          // for vector
+#include "Transmitter.h"                   // for Transmitter
+#include "Version.h"                       // for VERSION_MAJOR, VERSION_MINOR
+#include "flute_types.h"                   // for FecScheme
+#include "spdlog/sinks/syslog_sink.h"      // for syslog_logger_mt
+#include "spdlog/spdlog.h"                 // for error, info, set_default_l...
+namespace libconfig { class Config; }
+namespace libconfig { class FileIOException; }
+namespace libconfig { class ParseException; }
 
 using libconfig::Config;
 using libconfig::FileIOException;
@@ -40,7 +43,7 @@ using libconfig::ParseException;
 
 static void print_version(FILE *stream, struct argp_state *state);
 void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
-const char *argp_program_bug_address = "Austrian Broadcasting Services <obeca@ors.at>";
+const char *argp_program_bug_address = "5G-MAG Reference Tools <reference-tools@5g-mag.com>";
 static char doc[] = "FLUTE/ALC transmitter demo";  // NOLINT
 
 static struct argp_option options[] = {  // NOLINT

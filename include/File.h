@@ -14,14 +14,15 @@
 // under the License.
 //
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
-#include <map>
-#include <memory>
-#include "AlcPacket.h"
-#include "FileDeliveryTable.h"
-#include "EncodingSymbol.h"
-#include "flute_types.h"
+
+#include <stddef.h>             // for size_t
+#include <stdint.h>             // for uint32_t, uint16_t, uint64_t
+#include <map>                  // for map
+#include <string>               // for string
+#include <vector>               // for vector
+#include "FileDeliveryTable.h"  // for FileDeliveryTable, FileDeliveryTable:...
+#include "flute_types.h"        // for FecOti, SourceBlock
+namespace LibFlute { class EncodingSymbol; }
 
 namespace LibFlute {
   /**

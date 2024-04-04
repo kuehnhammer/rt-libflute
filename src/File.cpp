@@ -14,18 +14,26 @@
 // under the License.
 //
 #include "File.h"
-#include <iostream>
-#include <string>
-#include <cstring>
-#include <cmath>
-#include <cassert>
-#include <algorithm>
-#include <sstream>
-#include <iomanip>
-#include <openssl/md5.h>
-#include <openssl/evp.h>
-#include "base64.h"
-#include "spdlog/spdlog.h"
+#include <openssl/evp.h>         // for EVP_DigestFinal_ex, EVP_DigestInit_ex
+#include <openssl/md5.h>         // for MD5_DIGEST_LENGTH
+#include <openssl/types.h>       // for EVP_MD, EVP_MD_CTX
+#include <stdio.h>               // for sprintf
+#include <stdlib.h>              // for malloc, free
+#include <time.h>                // for time
+#include <algorithm>             // for all_of, min, max
+#include <cassert>               // for assert
+#include <cmath>                 // for ceil, floor
+#include <cstdint>               // for uint16_t
+#include <cstring>               // for memcmp, memcpy
+#include <exception>             // for exception
+#include <memory>                // for shared_ptr, __shared_ptr_access, dyn...
+#include <string>                // for string, basic_string
+#include <utility>               // for pair, move
+#include "EncodingSymbol.h"      // for EncodingSymbol
+#include "base64.h"              // for base64_decode, base64_encode
+#include "fec/FecTransformer.h"  // for FecTransformer
+#include "spdlog/spdlog.h"       // for debug, error, warn
+
 #ifdef RAPTOR_ENABLED
 #include "fec/RaptorFEC.h"
 #endif

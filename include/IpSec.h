@@ -14,7 +14,8 @@
 // under the License.
 //
 #pragma once
-#include <string>
+#include <cstdint>  // for uint32_t
+#include <string>    // for string
 
 namespace LibFlute::IpSec {
   enum class Direction { In, Out };

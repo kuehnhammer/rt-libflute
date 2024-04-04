@@ -13,13 +13,14 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstdio>
-#include <cstring>
-#include <iostream>
-#include <cmath>
-#include <arpa/inet.h>
-#include "spdlog/spdlog.h"
+
 #include "EncodingSymbol.h"
+#include <netinet/in.h>     // for htons, ntohs
+#include <algorithm>        // for min
+#include <cmath>            // for ceil
+#include <cstring>          // for memcpy
+#include <exception>        // for exception
+#include "spdlog/spdlog.h"  // for warn
 
 auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len, const FecOti& fec_oti, ContentEncoding encoding) -> std::vector<EncodingSymbol> 
 {

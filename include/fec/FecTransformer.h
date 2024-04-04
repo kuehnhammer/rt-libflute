@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <map>
 #include "tinyxml2.h"
+#include "flute_types.h"
 
 
 #include <string>
