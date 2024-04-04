@@ -49,7 +49,7 @@ namespace LibFlute {
       *                   while the file is being transmitted.
       */
       File(uint32_t toi, 
-          FecOti fec_oti,
+          const FecOti& fec_oti,
           std::string content_location,
           std::string content_type,
           uint64_t expires,

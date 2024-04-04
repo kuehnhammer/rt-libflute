@@ -192,13 +192,13 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
   lct_header->half_word_flag = 1;
   if (_fec_oti.encoding_id == LibFlute::FecScheme::CompactNoCode) {
     lct_header->codepoint = 0;
-  } else if (_fec_oti.encoding_id == LibFlute::FecScheme::Raptor10) {
+  } else if (_fec_oti.encoding_id == LibFlute::FecScheme::Raptor) {
     lct_header->codepoint = 1;
   } else {
     throw "Unsupported FEC scheme";
   }
   lct_header->lct_header_len = lct_header_len;
-  lct_header->codepoint = (uint8_t) fec_oti.encoding_id;
+  lct_header->codepoint = (uint8_t)_fec_oti.encoding_id;
   auto hdr_ptr = _buffer + 4;
   auto payload_ptr = _buffer + 4UL * lct_header_len;
 

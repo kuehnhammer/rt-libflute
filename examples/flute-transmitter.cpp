@@ -38,18 +38,10 @@ using libconfig::Config;
 using libconfig::FileIOException;
 using libconfig::ParseException;
 
-using namespace boost::placeholders;
-
 static void print_version(FILE *stream, struct argp_state *state);
 void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
 const char *argp_program_bug_address = "Austrian Broadcasting Services <obeca@ors.at>";
 static char doc[] = "FLUTE/ALC transmitter demo";  // NOLINT
-
-const char* fec_options =  "FEC scheme to use: cnc (Compact No-Code [default])"
-#ifdef ENABLE_RAPTOR10
-                           ", r10 (Raptor10)"
-#endif
-                           "";
 
 static struct argp_option options[] = {  // NOLINT
     {"target", 'm', "IP", 0, "Target multicast address (default: 238.1.1.95)", 0},
@@ -57,7 +49,6 @@ static struct argp_option options[] = {  // NOLINT
     {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
     {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
     {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit (kbps), 0 = no limit, default: 1000 (1 Mbps)", 0},
-    {"fec", 'f', "cnc|r10", 0, fec_options, 0},
     {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP encryption of packets, provide a hex-encoded AES key here", 0},
     {"log-level", 'l', "LEVEL", 0,
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
@@ -78,7 +69,6 @@ struct ft_arguments {
   unsigned log_level = 2;        /**< log level */
   unsigned fec = 0;        /**< log level */
   char **files;
-  LibFlute::FecScheme fec_scheme = LibFlute::FecScheme::CompactNoCode;
 };
 
 /**
@@ -89,15 +79,6 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
   switch (key) {
     case 'm':
       arguments->mcast_target = arg;
-      break;
-    case 'f':
-      if (strcmp(arg, "cnc") == 0) {
-        arguments->fec_scheme = LibFlute::FecScheme::CompactNoCode;
-      } else if (strcmp(arg, "r10") == 0) {
-        arguments->fec_scheme = LibFlute::FecScheme::Raptor10;
-      } else {
-        argp_usage (state);
-      }
       break;
     case 'k':
       arguments->aes_key = arg;
@@ -246,8 +227,7 @@ auto main(int argc, char **argv) -> int {
           "application/octet-stream",
           transmitter.seconds_since_epoch() + 60, // 1 minute from now
           file.buffer,
-          file.len,
-          arguments.fec_scheme
+          file.len
           );
       if (file.toi > 0) {
         spdlog::info("Queued {} ({} bytes) for transmission, TOI is {}",

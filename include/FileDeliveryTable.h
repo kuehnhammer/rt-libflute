@@ -18,7 +18,6 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
-#include <unique_ptr>
 #include "flute_types.h"
 
 namespace LibFlute {
@@ -65,7 +64,7 @@ namespace LibFlute {
         std::string content_type;
         uint64_t expires;
         FecOti fec_oti;
-        std::unique_ptr<FecTransformer> fec_transformer = {};
+        FecTransformer *fec_transformer;
       };
 
      /**

@@ -45,9 +45,15 @@ if(ENABLE_RAPTOR)
   add_library(raptor STATIC)
   target_sources(raptor
     PRIVATE
-          raptor/bipartite.c raptor/decoder.c raptor/encoder.c raptor/galois.c raptor/gaussian.c raptor/pivoting.c raptor/random.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/bipartite.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/decoder.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/encoder.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/galois.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/gaussian.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/pivoting.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/random.c
     PUBLIC
-          raptor/raptor.h
+      ${PROJECT_SOURCE_DIR}/lib/raptor/raptor.h
   )
   target_link_libraries(raptor LINK_PUBLIC m)
 else()
@@ -57,18 +63,17 @@ endif()
 add_library(flute "")
 target_sources(flute
   PRIVATE
-    src/Receiver.cpp src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp
-    src/File.cpp src/File_FEC_CompactNoCode.cpp
+    src/Receiver.cpp src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp src/File.cpp 
     utils/base64.cpp
   PUBLIC
     include/Receiver.h include/Transmitter.h include/File.h
 
   )
-target_include_directories(flute PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include/)
+target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/include/)
 
 if(ENABLE_RAPTOR)
   add_compile_definitions(RAPTOR_ENABLED)
-  target_include_directories(flute PUBLIC ${CMAKE_CURRENT_LIST_DIR}/raptor/)
+  target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/lib/raptor/)
   target_sources(flute
     PRIVATE
 	  src/RaptorFEC.cpp
@@ -87,23 +92,3 @@ target_link_libraries( flute
     PkgConfig::TINYXML
     PkgConfig::NETLINK
 )
-
-if (ENABLE_RAPTOR10)
-  add_definitions(-DENABLE_RAPTOR10)
-  add_subdirectory(lib/raptor10)
-  include_directories(
-    SYSTEM
-    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
-    )
-  target_sources(flute
-    PRIVATE
-    src/File_FEC_Raptor10.cpp
-    )
-  link_directories(
-    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
-    )
-  target_link_libraries( flute
-    LINK_PUBLIC
-    raptor
-    )
-endif (ENABLE_RAPTOR10)

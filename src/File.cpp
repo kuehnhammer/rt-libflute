@@ -27,49 +27,8 @@
 #include "base64.h"
 #include "spdlog/spdlog.h"
 
-#include "File_FEC_CompactNoCode.h"
-
-#ifdef ENABLE_RAPTOR10
-#include "File_FEC_Raptor10.h"
-#endif
-
-std::shared_ptr<LibFlute::File> LibFlute::File::create_file(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5)
-{
-  switch (entry.fec_oti.encoding_id) {
-    case FecScheme::CompactNoCode: return std::make_shared<LibFlute::File_FEC_CompactNoCode>(std::move(entry), enable_md5);
-#ifdef ENABLE_RAPTOR10
-    case FecScheme::Raptor10: return std::make_shared<LibFlute::File_FEC_Raptor10>(std::move(entry), enable_md5);
-#endif
-    default: return nullptr;
-  }
-}
-
-std::shared_ptr<LibFlute::File> LibFlute::File::create_file(uint32_t toi, 
-          FecOti fec_oti,
-          std::string content_location,
-          std::string content_type,
-          uint64_t expires,
-          char* data,
-          size_t length,
-          bool copy_data,
-          bool enable_md5)
-{
-  switch (fec_oti.encoding_id) {
-    case FecScheme::CompactNoCode: return std::make_shared<LibFlute::File_FEC_CompactNoCode>(
-         toi, std::move(fec_oti), std::move(content_location), std::move(content_type), expires, 
-         data, length, copy_data, enable_md5);
-#ifdef ENABLE_RAPTOR10
-    case FecScheme::Raptor10: return std::make_shared<LibFlute::File_FEC_Raptor10>(
-         toi, std::move(fec_oti), std::move(content_location), std::move(content_type), expires, 
-         data, length, copy_data, enable_md5);
-#endif
-    default: return nullptr;
-  }
-}
-
-LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5)
-  : _meta(std::move(entry))
-  , _enable_md5(enable_md5)
+LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry)
+  : _meta( std::move(entry) )
   , _received_at( time(nullptr) )
 {
   spdlog::debug("Creating File from FileEntry");
@@ -85,18 +44,19 @@ LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_m
     throw "Failed to allocate file buffer";
   }
   _own_buffer = true;
+
+  calculate_partitioning();
+  create_blocks();
 }
 
 LibFlute::File::File(uint32_t toi,
-    FecOti fec_oti,
+    const FecOti& fec_oti,
     std::string content_location,
     std::string content_type,
     uint64_t expires,
     char* data,
     size_t length,
-    bool copy_data, 
-    bool enable_md5) 
-  : _enable_md5(enable_md5)
+    bool copy_data) 
 {
   if (!data) {
     spdlog::error("File pointer is null");
@@ -127,34 +87,35 @@ LibFlute::File::File(uint32_t toi,
   _meta.content_location = std::move(content_location);
   _meta.content_type = std::move(content_type);
   _meta.content_length = length;
+  _meta.content_md5 = base64_encode(md5, MD5_DIGEST_LENGTH);
   _meta.expires = expires;
-  _meta.fec_oti = std::move(fec_oti);
+  _meta.fec_oti = fec_oti;
 
-  if (_enable_md5) {
-    unsigned char md5[MD5_DIGEST_LENGTH];
-    MD5((const unsigned char*)data, length, md5);
-    _meta.content_md5 = base64_encode(md5, MD5_DIGEST_LENGTH);
-  }
+#ifdef RAPTOR_ENABLED
+  RaptorFEC *r = nullptr;
+#endif
 
   switch (_meta.fec_oti.encoding_id) {
     case FecScheme::CompactNoCode:
-      _meta.fec_transformer = nullptr;
       _meta.fec_oti.transfer_length = length;
+      _meta.fec_transformer = 0;
       break;
 #ifdef RAPTOR_ENABLED
     case FecScheme::Raptor:
-      _meta.fec_transformer = std::make_unique<RaptorFEC>(
-            length, fec_oti.encoding_symbol_length
-          ); 
       _meta.fec_oti.transfer_length = length;
+      r = new RaptorFEC(length, fec_oti.encoding_symbol_length);
       _meta.fec_oti.encoding_symbol_length = r->T;
       _meta.fec_oti.max_source_block_length = r->K * r->T;
+      _meta.fec_transformer = r; 
       break;
 #endif
     default:
       throw "FEC scheme not supported or not yet implemented";
       break;
   }
+
+  calculate_partitioning();
+  create_blocks();
 }
 
 LibFlute::File::~File()
@@ -164,19 +125,6 @@ LibFlute::File::~File()
   {
     spdlog::debug("Freeing buffer");
     free(_buffer);
-  }
-}
-
-auto LibFlute::File::check_md5() -> void 
-{
-  if (_complete && !_meta.content_md5.empty()) {
-    unsigned char md5[MD5_DIGEST_LENGTH];
-    MD5((const unsigned char*)buffer(), length(), md5);
-
-    auto content_md5 = base64_decode(_meta.content_md5);
-    if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
-      reset();
-    }
   }
 }
 
@@ -230,13 +178,26 @@ auto LibFlute::File::check_file_completion() -> void
 
   if (_complete && !_meta.content_md5.empty()) {
 
-      if (_meta.fec_transformer) {
+      if(_meta.fec_transformer){
           _meta.fec_transformer->extract_file(_source_blocks);
       }
 
-      if (_enable_md5) {
-        check_md5();
+    //check MD5 sum
+    unsigned char md5[EVP_MAX_MD_SIZE];
+    calculate_md5(buffer(),length(),md5);
+
+    auto content_md5 = base64_decode(_meta.content_md5);
+    if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
+      spdlog::error("MD5 mismatch for TOI {}, discarding", _meta.toi);
+ 
+      // MD5 mismatch, try again
+      for (auto& block : _source_blocks) {
+        for (auto& symbol : block.second.symbols) {
+          symbol.second.complete = false;
+        }
+        block.second.complete = false;
       }
+      _complete = false;
     }
   }
 }

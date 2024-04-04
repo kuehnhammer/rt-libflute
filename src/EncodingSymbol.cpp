@@ -81,13 +81,11 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   }
 
   for (const auto& symbol : symbols) {
-    spdlog::debug("syn len {}, data_len {}", symbol.len(), data_len);
     if (symbol.len() <= data_len) {
-      auto symbol_len = symbol.copy_encoded(ptr, data_len);
+      auto symbol_len = symbol.encode_to(ptr, data_len);
       data_len -= symbol_len;
       ptr += symbol_len;
       len += symbol_len;
-    spdlog::debug("enc len {}, data_len {}, encoded_data {}, len {}", symbol_len, data_len, encoded_data, len);
     }
   }
   return len;
@@ -106,7 +104,6 @@ auto LibFlute::EncodingSymbol::decode_to(char* buffer, size_t max_length) const 
       throw "EncodingSymbol::decode_to() called for unknown fec scheme";
       break;
   }
-  return false;
 }
 
 auto LibFlute::EncodingSymbol::encode_to(char* buffer, size_t max_length) const -> size_t {

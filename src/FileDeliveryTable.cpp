@@ -17,21 +17,20 @@
 #include "tinyxml2.h"
 #include <iostream>
 #include <string>
-#include "base64.h"
 #include "spdlog/spdlog.h"
 
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_oti)
   : _instance_id( instance_id )
   , _global_fec_oti( std::move(fec_oti) )
 {
-  switch (fec_oti.encoding_id){
+  switch (_global_fec_oti.encoding_id){
 #ifdef RAPTOR_ENABLED
     case FecScheme::Raptor:
-    _fdt_fec_transformer = std::make_unique<RaptorFEC>();
+    _fdt_fec_transformer = new RaptorFEC();
     break;
 #endif
     default:
-    _fdt_fec_transformer = nullptr;
+    _fdt_fec_transformer = 0;
     break;
   }
 }
@@ -51,8 +50,7 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   auto fdt_instance = doc.FirstChildElement("FDT-Instance");
   _expires = std::stoull(fdt_instance->Attribute("Expires"));
 
-  spdlog::debug("Received new FDT with instance ID {}", instance_id);
-  spdlog::trace("FDT content:\n{}", std::string(buffer, len));
+  spdlog::debug("Received new FDT with instance ID {}: {}", instance_id, buffer);
 
   uint8_t def_fec_encoding_id = 0;
   auto val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
@@ -70,12 +68,6 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   val = fdt_instance->Attribute("FEC-OTI-Encoding-Symbol-Length");
   if (val != nullptr) {
     def_fec_encoding_symbol_length = strtoul(val, nullptr, 0);
-  }
-
-  std::string def_scheme_specific_info = "";
-  val = fdt_instance->Attribute("FEC-OTI-Scheme-Specific-Info");
-  if (val != nullptr) {
-    def_scheme_specific_info = base64_decode((const std::string&)val);
   }
 
   for (auto file = fdt_instance->FirstChildElement("File"); 
@@ -152,7 +144,6 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     if (fec_transformer && !fec_transformer->parse_fdt_info(file)) {
       throw "Failed to parse fdt info for specific FEC data";
     }
-
     uint32_t expires = 0;
     auto cc = file->FirstChildElement("mbms2007:Cache-Control");
     if (cc) {
@@ -166,8 +157,7 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       (FecScheme)encoding_id,
         transfer_length,
         encoding_symbol_length,
-        max_source_block_length,
-        scheme_specific_info
+        max_source_block_length
     };
 
     FileEntry fe{
@@ -213,23 +203,16 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   root->SetAttribute("Expires", std::to_string(_expires).c_str());
   root->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)_global_fec_oti.encoding_id);
   root->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", (unsigned)_global_fec_oti.max_source_block_length);
+  root->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)_global_fec_oti.encoding_symbol_length);
   root->SetAttribute("xmlns:mbms2007", "urn:3GPP:metadata:2007:MBMS:FLUTE:FDT");
   doc.InsertEndChild(root);
 
   for (const auto& file : _file_entries) {
     auto f = doc.NewElement("File");
     f->SetAttribute("TOI", file.toi);
-    f->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)file.fec_oti.encoding_symbol_length);
-    f->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)file.fec_oti.encoding_id);
-    if (file.fec_oti.scheme_specific_info.size() > 0) {
-      auto enc = base64_encode(file.fec_oti.scheme_specific_info);
-      f->SetAttribute("FEC-OTI-Scheme-Specific-Info", enc.c_str());
-    }
     f->SetAttribute("Content-Location", file.content_location.c_str());
     f->SetAttribute("Content-Length", file.content_length);
-    if (file.fec_oti.transfer_length > 0) {
-      f->SetAttribute("Transfer-Length", (unsigned)file.fec_oti.transfer_length);
-    }
+    f->SetAttribute("Transfer-Length", (unsigned)file.fec_oti.transfer_length);
     f->SetAttribute("Content-MD5", file.content_md5.c_str());
     f->SetAttribute("Content-Type", file.content_type.c_str());
     if(file.fec_transformer) {
@@ -246,5 +229,5 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
 
   tinyxml2::XMLPrinter printer;
   doc.Print(&printer);
-  return {printer.CStr()};
+  return std::string(printer.CStr());
 }
