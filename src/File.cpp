@@ -26,6 +26,9 @@
 #include <openssl/evp.h>
 #include "base64.h"
 #include "spdlog/spdlog.h"
+#ifdef RAPTOR_ENABLED
+#include "fec/RaptorFEC.h"
+#endif
 
 LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry)
   : _meta( std::move(entry) )
@@ -91,22 +94,18 @@ LibFlute::File::File(uint32_t toi,
   _meta.expires = expires;
   _meta.fec_oti = fec_oti;
 
-#ifdef RAPTOR_ENABLED
-  RaptorFEC *r = nullptr;
-#endif
-
   switch (_meta.fec_oti.encoding_id) {
     case FecScheme::CompactNoCode:
+      _meta.fec_transformer = nullptr;
       _meta.fec_oti.transfer_length = length;
-      _meta.fec_transformer = 0;
       break;
 #ifdef RAPTOR_ENABLED
     case FecScheme::Raptor:
+      _meta.fec_transformer = std::make_shared<RaptorFEC>(length, fec_oti.encoding_symbol_length); 
       _meta.fec_oti.transfer_length = length;
-      r = new RaptorFEC(length, fec_oti.encoding_symbol_length);
-      _meta.fec_oti.encoding_symbol_length = r->T;
-      _meta.fec_oti.max_source_block_length = r->K * r->T;
-      _meta.fec_transformer = r; 
+      _meta.fec_oti.encoding_symbol_length = std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->T;
+      _meta.fec_oti.max_source_block_length = std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->K * 
+        std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->T;
       break;
 #endif
     default:

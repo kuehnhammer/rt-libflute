@@ -76,9 +76,9 @@ if(ENABLE_RAPTOR)
   target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/lib/raptor/)
   target_sources(flute
     PRIVATE
-	  src/RaptorFEC.cpp
+	  src/fec/RaptorFEC.cpp
 	PUBLIC
-	  include/RaptorFEC.h
+	  include/fec/RaptorFEC.h
   )
   target_link_libraries(flute LINK_PUBLIC raptor)
 endif()

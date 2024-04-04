@@ -102,10 +102,6 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
             if (it->second.get() != file && it->second->meta().content_location == file->meta().content_location)
             {
               spdlog::debug("Replacing file with TOI {}", it->first);
-              if (it->second.get()->meta().fec_transformer){
-                delete it->second.get()->meta().fec_transformer;
-                it->second.get()->meta().fec_transformer = 0;
-              }
               it = _files.erase(it);
             }
             else
@@ -117,10 +113,6 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
           spdlog::debug("File with TOI {} completed", alc.toi());
           if (alc.toi() != 0 && _completion_cb) {
             _completion_cb(_files[alc.toi()]);
-            if (_files[alc.toi()]->meta().fec_transformer){
-              delete _files[alc.toi()]->meta().fec_transformer;
-              _files[alc.toi()]->meta().fec_transformer = 0;
-            }
             _files.erase(alc.toi());
           }
 
@@ -174,10 +166,6 @@ auto LibFlute::Receiver::remove_expired_files(unsigned max_age) -> void
   {
     auto age = time(nullptr) - it->second->received_at();
     if ( it->second->meta().content_location != "bootstrap.multipart"  && age > max_age) {
-      if (it->second.get()->meta().fec_transformer){
-        delete it->second.get()->meta().fec_transformer;
-        it->second.get()->meta().fec_transformer = 0;
-      }
       it = _files.erase(it);
     } else {
       ++it;
@@ -191,10 +179,6 @@ auto LibFlute::Receiver::remove_file_with_content_location(const std::string& cl
   for (auto it = _files.cbegin(); it != _files.cend();)
   {
     if ( it->second->meta().content_location == cl) {
-      if (it->second.get()->meta().fec_transformer){
-        delete it->second.get()->meta().fec_transformer;
-        it->second.get()->meta().fec_transformer = 0;
-      }
       it = _files.erase(it);
     } else {
       ++it;

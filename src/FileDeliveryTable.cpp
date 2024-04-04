@@ -18,6 +18,9 @@
 #include <iostream>
 #include <string>
 #include "spdlog/spdlog.h"
+#ifdef RAPTOR_ENABLED
+#include "fec/RaptorFEC.h"
+#endif
 
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_oti)
   : _instance_id( instance_id )
@@ -26,19 +29,12 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_
   switch (_global_fec_oti.encoding_id){
 #ifdef RAPTOR_ENABLED
     case FecScheme::Raptor:
-    _fdt_fec_transformer = new RaptorFEC();
+    _fdt_fec_transformer = std::make_unique<RaptorFEC>();
     break;
 #endif
     default:
-    _fdt_fec_transformer = 0;
+    _fdt_fec_transformer = nullptr;
     break;
-  }
-}
-
-LibFlute::FileDeliveryTable::~FileDeliveryTable() {
-  if (_fdt_fec_transformer) {
-    delete _fdt_fec_transformer;
-    _fdt_fec_transformer = 0;
   }
 }
 
@@ -115,12 +111,12 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       encoding_id = strtoul(val, nullptr, 0);
     }
 
-    FecTransformer *fec_transformer = 0;
+    std::shared_ptr<FecTransformer> fec_transformer = nullptr;
 
     switch (encoding_id){
 #ifdef RAPTOR_ENABLED
       case (int) FecScheme::Raptor:
-        fec_transformer = new RaptorFEC(); // corresponding delete calls in Receiver.cpp and destuctor function
+        fec_transformer = std::make_shared<RaptorFEC>();
       spdlog::debug("Received FDT entry for a raptor encoded file");
         break;
 #endif
@@ -184,10 +180,6 @@ auto LibFlute::FileDeliveryTable::remove(uint32_t toi) -> void
 {
   for (auto it = _file_entries.begin(); it != _file_entries.end();) {
     if (it->toi == toi) {
-      if (it->fec_transformer) {
-        delete it->fec_transformer;
-        it->fec_transformer = 0;
-      }
       it = _file_entries.erase(it);
     } else {
       ++it;

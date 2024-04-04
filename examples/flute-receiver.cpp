@@ -49,6 +49,7 @@ static struct argp_option options[] = {  // NOLINT
     {"target", 'm', "IP", 0, "Multicast address to receive on (default: 238.1.1.95)", 0},
     {"port", 'p', "PORT", 0, "Multicast port (default: 40085)", 0},
     {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP decryption of packets, provide a hex-encoded AES key here", 0},
+    {"tsi", 't', "TSI", 0, "TSI to receive (default: 0)", 0},
     {"log-level", 'l', "LEVEL", 0,
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
      "critical, 6 = none. Default: 2.",
@@ -70,6 +71,7 @@ struct ft_arguments {
   char *download_dir = nullptr;
   unsigned nfiles = 0;        /**< log level */
   char **files;
+  unsigned tsi = 0;
 };
 
 /**
@@ -99,6 +101,9 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
       break;
     case 'n':
       arguments->nfiles = static_cast<unsigned>(strtoul(arg, nullptr, 10));
+      break;
+    case 't':
+      arguments->tsi = static_cast<unsigned>(strtoul(arg, nullptr, 10));
       break;
     default:
       return ARGP_ERR_UNKNOWN;
@@ -156,7 +161,7 @@ auto main(int argc, char **argv) -> int {
         arguments.flute_interface,
         arguments.mcast_target,
         (short)arguments.mcast_port,
-        16,
+        arguments.tsi,
         io);
 
     // Configure IPSEC, if enabled
