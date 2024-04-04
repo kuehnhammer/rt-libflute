@@ -14,7 +14,7 @@
 // under the License.
 //
 #include "FileDeliveryTable.h"
-#include <stdlib.h>         // for strtoul, strtoull
+#include <cstdlib>         // for strtoul, strtoull
 #include <exception>        // for exception
 #include <string>           // for string, to_string, stoull
 #include <utility>          // for move
@@ -45,13 +45,13 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
 {
   tinyxml2::XMLDocument doc(true, tinyxml2::COLLAPSE_WHITESPACE);
   doc.Parse(buffer, len);
-  auto fdt_instance = doc.FirstChildElement("FDT-Instance");
+  auto* fdt_instance = doc.FirstChildElement("FDT-Instance");
   _expires = std::stoull(fdt_instance->Attribute("Expires"));
 
   spdlog::debug("Received new FDT with instance ID {}: {}", instance_id, buffer);
 
   uint8_t def_fec_encoding_id = 0;
-  auto val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
+  const auto* val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
   if (val != nullptr) {
     def_fec_encoding_id = strtoul(val, nullptr, 0);
   }
@@ -68,17 +68,17 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     def_fec_encoding_symbol_length = strtoul(val, nullptr, 0);
   }
 
-  for (auto file = fdt_instance->FirstChildElement("File"); 
+  for (auto* file = fdt_instance->FirstChildElement("File"); 
       file != nullptr; file = file->NextSiblingElement("File")) {
 
     // required attributes
-    auto toi_str = file->Attribute("TOI");
+    const auto* toi_str = file->Attribute("TOI");
     if (toi_str == nullptr) {
       throw "Missing TOI attribute on File element";
     }
     uint32_t toi = strtoull(toi_str, nullptr, 0);
 
-    auto content_location = file->Attribute("Content-Location");
+    const auto* content_location = file->Attribute("Content-Location");
     if (content_location == nullptr) {
       throw "Missing Content-Location attribute on File element";
     }
@@ -97,13 +97,13 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       transfer_length = content_length;
     }
 
-    auto content_md5 = file->Attribute("Content-MD5");
-    if (!content_md5) {
+    const auto* content_md5 = file->Attribute("Content-MD5");
+    if (content_md5 == nullptr) {
       content_md5 = "";
     }
 
-    auto content_type = file->Attribute("Content-Type");
-    if (!content_type) {
+    const auto* content_type = file->Attribute("Content-Type");
+    if (content_type == nullptr) {
       content_type = "";
     }
 
@@ -143,10 +143,10 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       throw "Failed to parse fdt info for specific FEC data";
     }
     uint32_t expires = 0;
-    auto cc = file->FirstChildElement("mbms2007:Cache-Control");
-    if (cc) {
-      auto expires_elem = cc->FirstChildElement("mbms2007:Expires");
-      if (expires_elem) {
+    auto* cc = file->FirstChildElement("mbms2007:Cache-Control");
+    if (cc != nullptr) {
+      auto* expires_elem = cc->FirstChildElement("mbms2007:Expires");
+      if (expires_elem != nullptr) {
         expires = strtoul(expires_elem->GetText(), nullptr, 0);
       }
     }
@@ -172,10 +172,10 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   }
 }
 
-auto LibFlute::FileDeliveryTable::add(FileEntry& fe) -> void
+auto LibFlute::FileDeliveryTable::add(FileEntry& entry) -> void
 {
   _instance_id++;
-  _file_entries.push_back(fe);
+  _file_entries.push_back(entry);
 }
 
 auto LibFlute::FileDeliveryTable::remove(uint32_t toi) -> void
@@ -193,7 +193,7 @@ auto LibFlute::FileDeliveryTable::remove(uint32_t toi) -> void
 auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   tinyxml2::XMLDocument doc;
   doc.InsertFirstChild( doc.NewDeclaration() );
-  auto root = doc.NewElement("FDT-Instance");
+  auto* root = doc.NewElement("FDT-Instance");
   root->SetAttribute("Expires", std::to_string(_expires).c_str());
   root->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)_global_fec_oti.encoding_id);
   root->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", (unsigned)_global_fec_oti.max_source_block_length);
@@ -202,7 +202,7 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   doc.InsertEndChild(root);
 
   for (const auto& file : _file_entries) {
-    auto f = doc.NewElement("File");
+    auto* f = doc.NewElement("File");
     f->SetAttribute("TOI", file.toi);
     f->SetAttribute("Content-Location", file.content_location.c_str());
     f->SetAttribute("Content-Length", file.content_length);
@@ -212,8 +212,8 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
     if(file.fec_transformer) {
       file.fec_transformer->add_fdt_info(f);
     }
-    auto cc = doc.NewElement("mbms2007:Cache-Control");
-    auto exp = doc.NewElement("mbms2007:Expires");
+    auto* cc = doc.NewElement("mbms2007:Cache-Control");
+    auto* exp = doc.NewElement("mbms2007:Expires");
     exp->SetText(std::to_string(file.expires).c_str());
     cc->InsertEndChild(exp);
     f->InsertEndChild(cc);
@@ -223,5 +223,5 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
 
   tinyxml2::XMLPrinter printer;
   doc.Print(&printer);
-  return std::string(printer.CStr());
+  return {printer.CStr()};
 }

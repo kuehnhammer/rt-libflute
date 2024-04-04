@@ -33,7 +33,7 @@ namespace LibFlute {
       /**
        *  Write encoding symbols to a packet payload buffer
        */
-      static size_t to_payload(const std::vector<EncodingSymbol>&, char* encoded_data, size_t data_len, const FecOti& fec_oti, ContentEncoding encoding);
+      static size_t to_payload(const std::vector<EncodingSymbol>&, char* encoded_data, size_t data_len, const FecOti& fec_oti);
 
      /**
       *  Default constructor.

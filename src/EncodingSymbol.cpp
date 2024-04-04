@@ -62,10 +62,10 @@ auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len,
   return symbols;
 }
 
-auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& symbols, char* encoded_data, size_t data_len, const FecOti& fec_oti, ContentEncoding encoding) -> size_t
+auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& symbols, char* encoded_data, size_t data_len, const FecOti& fec_oti) -> size_t
 {
   size_t len = 0;
-  auto ptr = encoded_data;
+  auto* ptr = encoded_data;
   auto first_symbol = symbols.begin();
   switch (fec_oti.encoding_id) {
     case FecScheme::CompactNoCode:

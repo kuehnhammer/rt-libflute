@@ -14,7 +14,7 @@
 // under the License.
 //
 #include "Receiver.h"
-#include <time.h>
+#include <ctime>
 #include <boost/bind/bind.hpp>
 #include <boost/system/error_code.hpp>
 #include <cstdint>
@@ -52,7 +52,7 @@ LibFlute::Receiver::Receiver ( const std::string& iface, const std::string& addr
 
     _socket.async_receive_from(
         boost::asio::buffer(_data, max_length), _sender_endpoint,
-        boost::bind(&LibFlute::Receiver::handle_receive_from, this,
+        boost::bind(&LibFlute::Receiver::handle_receive_from, this, //NOLINT
           boost::asio::placeholders::error,
           boost::asio::placeholders::bytes_transferred));
 }
@@ -87,7 +87,7 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
 
       if (alc.toi() == 0 && (!_fdt || _fdt->instance_id() != alc.fdt_instance_id())) {
         if (_files.find(alc.toi()) == _files.end()) {
-          FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti(), 0};
+          FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti(), nullptr};
           _files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
         }
       }
@@ -105,7 +105,7 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
             _files[alc.toi()]->put_symbol(symbol);
         }
 
-        auto file = _files[alc.toi()].get();
+        auto* file = _files[alc.toi()].get();
         if (_files[alc.toi()]->complete()) {
           for (auto it = _files.begin(); it != _files.end();)
           {
@@ -144,13 +144,13 @@ auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& er
       } else {
         spdlog::trace("Discarding packet for unknown or already completed file with TOI {}", alc.toi());
       }
-    } catch (std::exception ex) {
+    } catch (std::exception& ex) {
       spdlog::warn("Failed to decode ALC/FLUTE packet: {}", ex.what());
     }
 
     _socket.async_receive_from(
         boost::asio::buffer(_data, max_length), _sender_endpoint,
-        boost::bind(&LibFlute::Receiver::handle_receive_from, this,
+        boost::bind(&LibFlute::Receiver::handle_receive_from, this, //NOLINT
           boost::asio::placeholders::error,
           boost::asio::placeholders::bytes_transferred));
   }

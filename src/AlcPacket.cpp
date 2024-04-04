@@ -15,7 +15,7 @@
 //
 #include "AlcPacket.h"
 #include <netinet/in.h>      // for ntohl, htons, ntohs, htonl
-#include <stdlib.h>          // for calloc, free
+#include <cstdlib>          // for calloc, free
 #include <cstring>           // for memcpy
 #include <utility>           // for move
 #include "EncodingSymbol.h"  // for EncodingSymbol
@@ -188,7 +188,7 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
 
   _buffer = (char*)calloc(max_packet_length, sizeof(char));
 
-  auto lct_header = (lct_header_t*)_buffer;
+  auto* lct_header = (lct_header_t*)_buffer;
 
   lct_header->version = 1;
   lct_header->half_word_flag = 1;
@@ -201,10 +201,10 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
   }
   lct_header->lct_header_len = lct_header_len;
   lct_header->codepoint = (uint8_t)_fec_oti.encoding_id;
-  auto hdr_ptr = _buffer + 4;
-  auto payload_ptr = _buffer + 4UL * lct_header_len;
+  auto* hdr_ptr = _buffer + 4;
+  auto* payload_ptr = _buffer + 4UL * lct_header_len;
 
-  auto payload_size = EncodingSymbol::to_payload(symbols, payload_ptr, max_size, _fec_oti, ContentEncoding::NONE);
+  auto payload_size = EncodingSymbol::to_payload(symbols, payload_ptr, max_size, _fec_oti);
   _len = 4L * lct_header_len + payload_size;
   
   hdr_ptr += 4; // CCI = 0
@@ -235,11 +235,12 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     *((uint16_t*)hdr_ptr) = htons(_fec_oti.encoding_symbol_length);
     hdr_ptr += 2;
     *((uint32_t*)hdr_ptr) = htonl(_fec_oti.max_source_block_length);
-    hdr_ptr += 4;
   }
 }
 
 LibFlute::AlcPacket::~AlcPacket()
 {
-  if (_buffer) free(_buffer);
+  if (_buffer != nullptr) {
+    free(_buffer);
+  }
 }

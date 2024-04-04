@@ -17,9 +17,9 @@
 #include <openssl/evp.h>         // for EVP_DigestFinal_ex, EVP_DigestInit_ex
 #include <openssl/md5.h>         // for MD5_DIGEST_LENGTH
 #include <openssl/types.h>       // for EVP_MD, EVP_MD_CTX
-#include <stdio.h>               // for sprintf
-#include <stdlib.h>              // for malloc, free
-#include <time.h>                // for time
+#include <cstdio>               // for sprintf
+#include <cstdlib>              // for malloc, free
+#include <ctime>                // for time
 #include <algorithm>             // for all_of, min, max
 #include <cassert>               // for assert
 #include <cmath>                 // for ceil, floor
@@ -69,7 +69,7 @@ LibFlute::File::File(uint32_t toi,
     size_t length,
     bool copy_data) 
 {
-  if (!data) {
+  if (data == nullptr) {
     spdlog::error("File pointer is null");
     throw "Invalid file";
   }
@@ -89,8 +89,8 @@ LibFlute::File::File(uint32_t toi,
     _buffer = data;
   }
 
-  unsigned char md5[EVP_MAX_MD_SIZE];
-  if ( calculate_md5(data, length, md5) < 0 ){
+  std::array<unsigned char, EVP_MAX_MD_SIZE> md5;
+  if ( calculate_md5(data, length, md5.data()) < 0 ){
     throw "Failed to calculate md5";
   }
 
@@ -98,7 +98,7 @@ LibFlute::File::File(uint32_t toi,
   _meta.content_location = std::move(content_location);
   _meta.content_type = std::move(content_type);
   _meta.content_length = length;
-  _meta.content_md5 = base64_encode(md5, MD5_DIGEST_LENGTH);
+  _meta.content_md5 = base64_encode({std::begin(md5), std::end(md5)}, MD5_DIGEST_LENGTH);
   _meta.expires = expires;
   _meta.fec_oti = fec_oti;
 
@@ -190,11 +190,11 @@ auto LibFlute::File::check_file_completion() -> void
       }
 
     //check MD5 sum
-    unsigned char md5[EVP_MAX_MD_SIZE];
-    calculate_md5(buffer(),length(),md5);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> md5;
+    calculate_md5(buffer(), length(), md5.data());
 
     auto content_md5 = base64_decode(_meta.content_md5);
-    if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
+    if (memcmp(md5.data(), content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
       spdlog::error("MD5 mismatch for TOI {}, discarding", _meta.toi);
  
       // MD5 mismatch, try again
@@ -234,14 +234,14 @@ auto LibFlute::File::create_blocks() -> void
   if (_meta.fec_transformer){
     int bytes_read = 0;
     _source_blocks = _meta.fec_transformer->create_blocks(_buffer, &bytes_read);
-    if (_source_blocks.size() <= 0) {
+    if (_source_blocks.empty()) {
       spdlog::error("FEC Transformer failed to create source blocks");
       throw "FEC Transformer failed to create source blocks";
     }
     return;
   }
 
-  auto buffer_ptr = _buffer;
+  auto* buffer_ptr = _buffer;
   size_t remaining_size = _meta.fec_oti.transfer_length;
   auto number = 0;
   while (remaining_size > 0) {
@@ -259,7 +259,9 @@ auto LibFlute::File::create_blocks() -> void
       remaining_size -= symbol_length;
       buffer_ptr += symbol_length;
       
-      if (remaining_size <= 0) break;
+      if (remaining_size <= 0) { 
+        break;
+      }
     }
     _source_blocks[number++] = block;
   }
@@ -267,17 +269,20 @@ auto LibFlute::File::create_blocks() -> void
 
 auto LibFlute::File::get_next_symbols(size_t max_size) -> std::vector<EncodingSymbol> 
 {
-  auto block = _source_blocks.begin();
   int nof_symbols = std::floor((float)max_size / (float)_meta.fec_oti.encoding_symbol_length);
   auto cnt = 0;
   std::vector<EncodingSymbol> symbols;
   spdlog::debug("Attempting to queue {} symbols",nof_symbols);
   for (auto& block : _source_blocks) {
-    if (cnt >= nof_symbols) break;
+    if (cnt >= nof_symbols) {
+      break;
+    }
 
     if (!block.second.complete) {
       for (auto& symbol : block.second.symbols) {
-        if (cnt >= nof_symbols) break;
+        if (cnt >= nof_symbols) {
+          break;
+        }
     
         if (!symbol.second.complete && !symbol.second.queued) {
           symbols.emplace_back(symbol.first, block.first, symbol.second.data, symbol.second.length, _meta.fec_oti.encoding_id);
@@ -293,7 +298,7 @@ auto LibFlute::File::get_next_symbols(size_t max_size) -> std::vector<EncodingSy
 
 auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, bool success) -> void
 {
-  for (auto& symbol : symbols) {
+  for (const auto& symbol : symbols) {
     auto block = _source_blocks.find(symbol.source_block_number());
     if (block != _source_blocks.end()) {
       auto sym = block->second.symbols.find(symbol.id());
@@ -307,10 +312,10 @@ auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, 
   }
 }
 
-  int LibFlute::calculate_md5(char *input, int length, unsigned char *result)
+auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) -> unsigned int
 {
   // simple implementation based on openssl docs (https://www.openssl.org/docs/man3.0/man3/EVP_DigestInit_ex.html) 
-  if (!input || ! length) {
+  if (input == nullptr || length == 0U) {
     spdlog::error("MD5 called with invalid input");
     return -1;
   }
@@ -320,13 +325,13 @@ auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, 
   const EVP_MD* md = EVP_md5();
   unsigned int  md_len;
 
-  EVP_DigestInit_ex(context, md, NULL);
+  EVP_DigestInit_ex(context, md, nullptr);
   EVP_DigestUpdate(context, input, length);
   EVP_DigestFinal_ex(context, result, &md_len);
   EVP_MD_CTX_free(context);
 
-  char buf [EVP_MAX_MD_SIZE * 2] = {};
-  for (unsigned int i = 0 ; i < md_len ; ++i){
+  char buf [EVP_MAX_MD_SIZE * 2] = {}; //NOLINT
+  for (auto i = 0UL; i < md_len; i++){
     sprintf(&buf[i*2], "%02x", result[i]);
   }
   spdlog::debug("MD5 Digest is {}", buf);

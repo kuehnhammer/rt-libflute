@@ -23,7 +23,7 @@
 #include <netlink/msg.h>      // for nlmsg_alloc_simple, nlmsg_append, nlmsg...
 #include <netlink/netlink.h>  // for nl_connect, nl_send_auto
 #include <netlink/socket.h>   // for nl_socket_alloc
-#include <stdlib.h>           // for strtol
+#include <cstdlib>           // for strtol
 #include <sys/socket.h>       // for AF_INET
 #include <cstring>            // for memcpy, strcpy
 #include <string>             // for string, basic_string
@@ -68,7 +68,7 @@ namespace LibFlute::IpSec {
     nl_send_auto(sk, msg);
     nlmsg_free(msg);
   }
-  void configure_state(uint32_t spi, const std::string& dest_address, Direction direction, const std::string& key)
+  void configure_state(uint32_t spi, const std::string& dest_address, Direction /*direction*/, const std::string& key)
   {
     struct nl_sock *sk;
     struct nl_msg *msg;
@@ -96,7 +96,7 @@ namespace LibFlute::IpSec {
     xsinfo.mode = XFRM_MODE_TRANSPORT;
 
     struct {
-      char buf[512];
+      char buf[512]; //NOLINT
       struct xfrm_algo xa;
     } algo = {};
 
@@ -109,7 +109,7 @@ namespace LibFlute::IpSec {
     }
     strcpy(algo.xa.alg_name, "aes");
     algo.xa.alg_key_len = binary_key.size() * 8;
-    memcpy(algo.buf, &binary_key[0], binary_key.size());
+    memcpy(algo.buf, binary_key.data(), binary_key.size());
 
     msg = nlmsg_alloc_simple(XFRM_MSG_NEWSA, 0);
     nlmsg_append(msg, &xsinfo, sizeof(xsinfo), NLMSG_ALIGNTO);

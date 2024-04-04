@@ -89,15 +89,14 @@ namespace LibFlute {
           const std::string& content_type,
           uint32_t expires,
           char* data,
-          size_t length,
-          FecScheme fec_scheme = FecScheme::CompactNoCode);
+          size_t length);
 
      /**
       *  Convenience function to get the current timestamp for expiry calculation
       *
       *  @return seconds since the NTP epoch
       */
-      uint64_t seconds_since_epoch();
+      static uint64_t seconds_since_epoch();
 
      /**
       *  Register a callback for file transmission completion notifications
@@ -113,7 +112,6 @@ namespace LibFlute {
 
       void file_transmitted(uint32_t toi);
 
-      void handle_send_to(const boost::system::error_code& error);
       boost::asio::ip::udp::endpoint _endpoint;
       boost::asio::ip::udp::socket _socket;
       boost::asio::io_service& _io_service;

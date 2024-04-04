@@ -17,7 +17,7 @@
 #include <argp.h>                          // for argp_state, argp_parse
 #include <fcntl.h>                         // for open, O_RDONLY
 #include <spdlog/common.h>                 // for level_enum
-#include <stdint.h>                        // for uint32_t
+#include <cstdint>                        // for uint32_t
 #include <sys/mman.h>                      // for mmap, munmap, MAP_PRIVATE
 #include <sys/stat.h>                      // for stat, fstat
 #include <syslog.h>                        // for LOG_CONS, LOG_PERROR, LOG_PID

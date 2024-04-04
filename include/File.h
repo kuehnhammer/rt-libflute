@@ -164,6 +164,6 @@ namespace LibFlute {
   * 
   *  @return length of the calculated md5 sum (should be 16 bytes for md5)
   */
-  int calculate_md5(char *input, int length, unsigned char *result);
+  unsigned int calculate_md5(char *input, size_t length, unsigned char *result);
 
 };
