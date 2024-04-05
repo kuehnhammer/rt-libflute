@@ -26,7 +26,9 @@
 #include <string>                          // for to_string, allocator, string
 #include "File.h"                          // for File
 #include "FileDeliveryTable.h"             // for FileDeliveryTable::FileEntry
+#include "ReceiverBase.h"                      // for Receiver
 #include "Receiver.h"                      // for Receiver
+#include "PcapReceiver.h"                  // for Receiver
 #include "Version.h"                       // for VERSION_MAJOR, VERSION_MINOR
 #include "spdlog/sinks/syslog_sink.h"      // for syslog_logger_mt
 #include "spdlog/spdlog.h"                 // for error, info, set_default_l...
@@ -48,6 +50,7 @@ static struct argp_option options[] = {  // NOLINT
     {"target", 'm', "IP", 0, "Multicast address to receive on (default: 238.1.1.95)", 0},
     {"port", 'p', "PORT", 0, "Multicast port (default: 40085)", 0},
     {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP decryption of packets, provide a hex-encoded AES key here", 0},
+    {"capture-file", 'c', "FILE", 0, "Read input packets from a PCAP capture file instead of receiving from the network", 0},
     {"tsi", 't', "TSI", 0, "TSI to receive (default: 0)", 0},
     {"log-level", 'l', "LEVEL", 0,
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
@@ -63,6 +66,7 @@ static struct argp_option options[] = {  // NOLINT
 struct ft_arguments {
   const char *flute_interface = {};  /**< file path of the config file. */
   const char *mcast_target = {};
+  const char *capture_file = nullptr;
   bool enable_ipsec = false;
   const char *aes_key = {};
   unsigned short mcast_port = 40085;
@@ -79,6 +83,9 @@ struct ft_arguments {
 static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
   auto arguments = static_cast<struct ft_arguments *>(state->input);
   switch (key) {
+    case 'c':
+      arguments->capture_file = arg;
+      break;
     case 'm':
       arguments->mcast_target = arg;
       break;
@@ -155,21 +162,39 @@ auto main(int argc, char **argv) -> int {
     // Create a Boost io_service
     boost::asio::io_service io;
 
-    // Create the receiver
-    LibFlute::Receiver receiver(
-        arguments.flute_interface,
-        arguments.mcast_target,
-        (short)arguments.mcast_port,
-        arguments.tsi,
-        io);
+    std::shared_ptr<LibFlute::ReceiverBase> receiver;
 
-    // Configure IPSEC, if enabled
-    if (arguments.enable_ipsec) 
-    {
-      receiver.enable_ipsec(1, arguments.aes_key);
+    // Create the receiver
+    if (arguments.capture_file != nullptr) {
+      try {
+      receiver = std::make_shared<LibFlute::PcapReceiver>(
+          arguments.capture_file,
+          arguments.mcast_target,
+          arguments.mcast_port,
+          arguments.tsi,
+          io);
+      } catch (std::runtime_error& ex) {
+        spdlog::error("PCAP receiver error. {}", ex.what());
+        exit(1);
+      }
+    } else {
+      auto net_receiver = std::make_shared<LibFlute::Receiver>(
+          arguments.flute_interface,
+          arguments.mcast_target,
+          arguments.mcast_port,
+          arguments.tsi,
+          io);
+
+      // Configure IPSEC, if enabled
+      if (arguments.enable_ipsec) 
+      {
+        net_receiver->enable_ipsec(1, arguments.aes_key);
+      }
+
+      receiver = net_receiver;
     }
 
-    receiver.register_completion_callback(
+    receiver->register_completion_callback(
         [&](std::shared_ptr<LibFlute::File> file) { //NOLINT
         spdlog::info("{} (TOI {}) has been received",
             file->meta().content_location, file->meta().toi);
@@ -195,7 +220,7 @@ auto main(int argc, char **argv) -> int {
         free(buf);
         if (file->meta().toi == arguments.nfiles) {
           spdlog::warn("{} file(s) received. Stopping reception",arguments.nfiles);
-          receiver.stop();
+          receiver->stop();
         }
         });
 

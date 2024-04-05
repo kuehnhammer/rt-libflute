@@ -184,28 +184,9 @@ auto LibFlute::File::check_file_completion() -> void
   _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(), [](const auto& block){ return block.second.complete; });
 
   if (_complete && !_meta.content_md5.empty()) {
-
       if(_meta.fec_transformer){
           _meta.fec_transformer->extract_file(_source_blocks);
       }
-
-    //check MD5 sum
-    std::array<unsigned char, EVP_MAX_MD_SIZE> md5;
-    calculate_md5(buffer(), length(), md5.data());
-
-    auto content_md5 = base64_decode(_meta.content_md5);
-    if (memcmp(md5.data(), content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
-      spdlog::error("MD5 mismatch for TOI {}, discarding", _meta.toi);
- 
-      // MD5 mismatch, try again
-      for (auto& block : _source_blocks) {
-        for (auto& symbol : block.second.symbols) {
-          symbol.second.complete = false;
-        }
-        block.second.complete = false;
-      }
-      _complete = false;
-    }
   }
 }
 

@@ -28,6 +28,7 @@
 #include <utility>          // for pair
 #include "raptor.h"         // for create_encoder_context, free_LT_packet
 #include "spdlog/spdlog.h"  // for debug, error, warn
+#include "base64.h"
 
 LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_payload) 
     : F(transfer_length)
@@ -243,41 +244,41 @@ bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {
   is_encoder = false;
 
   const char* val = 0;
-  val = file->Attribute("Transfer-Length");
+  uint32_t content_length = 0;
+  val = file->Attribute("Content-Length");
   if (val != nullptr) {
-    F = strtoul(val, nullptr, 0);
-  } else {
-    throw "Required field \"Transfer-Length\" is missing for an object in the FDT";
-  }
-  
-  val = file->Attribute("FEC-OTI-Number-Of-Source-Blocks");
-  if (val != nullptr) {
-    Z = strtoul(val, nullptr, 0);
-  } else {
-    throw "Required field \"FEC-OTI-Number-Of-Source-Blocks\" is missing for an object in the FDT";
-  }
-  
-  val = file->Attribute("FEC-OTI-Number-Of-Sub-Blocks");
-  if (val != nullptr) {
-    N = strtoul(val, nullptr, 0);
-  } else {
-    throw "Required field \"FEC-OTI-Number-Of-Sub-Blocks\" is missing for an object in the FDT";
+    content_length = strtoull(val, nullptr, 0);
   }
 
+  uint32_t transfer_length = 0;
+  val = file->Attribute("Transfer-Length");
+  if (val != nullptr) {
+    F = strtoull(val, nullptr, 0);
+  } else {
+    F = content_length;
+  }
+  
   val = file->Attribute("FEC-OTI-Encoding-Symbol-Length");
   if (val != nullptr) {
     T = strtoul(val, nullptr, 0);
   } else {
     throw "Required field \"FEC-OTI-Encoding-Symbol-Length\" is missing for an object in the FDT";
   }
-  
-  val = file->Attribute("FEC-OTI-Symbol-Alignment-Parameter");
+
+  std::string scheme_specific_info = "";
+  val = file->Attribute("FEC-OTI-Scheme-Specific-Info");
   if (val != nullptr) {
-    Al = strtoul(val, nullptr, 0);
-  } else {
-    throw "Required field \"FEC-OTI-Symbol-Alignment-Parameter\" is missing for an object in the FDT";
+    scheme_specific_info = base64_decode((const std::string&)val);
+  }
+  if (scheme_specific_info.length() != 4) {
+    throw "Missing or malformed scheme specific info for Raptor FEC";
   }
 
+  Z  = (uint8_t)scheme_specific_info[0] << 8;
+  Z |= (uint8_t)scheme_specific_info[1];
+  N  = (uint8_t)scheme_specific_info[2];
+  Al = (uint8_t)scheme_specific_info[3];
+  
   if (T % Al) {
     throw "Symbol size T is not a multiple of Al. Invalid configuration from sender";
   }
