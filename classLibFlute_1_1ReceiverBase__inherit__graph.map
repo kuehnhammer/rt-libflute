@@ -1,0 +1,5 @@
+<map id="LibFlute::ReceiverBase" name="LibFlute::ReceiverBase">
+<area shape="rect" id="node1" title="Abstract FLUTE receiver base class." alt="" coords="88,5,244,32"/>
+<area shape="rect" id="node2" href="$classLibFlute_1_1PcapReceiver.html" title="FLUTE receiver class." alt="" coords="5,80,161,107"/>
+<area shape="rect" id="node3" href="$classLibFlute_1_1Receiver.html" title="FLUTE receiver class." alt="" coords="185,80,312,107"/>
+</map>
