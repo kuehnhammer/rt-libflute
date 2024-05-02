@@ -15,6 +15,8 @@
 //
 #pragma once
 
+#include <string>
+
 /** \mainpage LibFlute - ALC/FLUTE library
  *
  * The library contains two simple **example applications** as a starting point:

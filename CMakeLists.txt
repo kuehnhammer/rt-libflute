@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project (libflute VERSION 0.9.0)
+project (libflute VERSION 0.11.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -10,10 +10,12 @@ option(ENABLE_RAPTOR10    "Enable support for Raptor10 FEC"     OFF)
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror -g3")
 set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")
 
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 find_package(Boost REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(PCAP REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
 
@@ -27,18 +29,20 @@ include_directories(
     SYSTEM
     ${PROJECT_SOURCE_DIR}/utils
     ${SPDLOG_INCLUDEDIR}
+    ${PCAP_INCLUDEDIR}
     PkgConfig::NETLINK
     )
 
 configure_file("include/Version.h.in" "Version.h")
 
 
-set(CMAKE_CXX_CLANG_TIDY clang-tidy --format-style=google --checks=clang-diagnostic-*,clang-analyzer-*,-*,bugprone*,modernize*,performance*,-modernize-use-trailing-return-type,-modernize-avoid-c-arrays,-modernize-avoid-bind)
+set(CMAKE_CXX_CLANG_TIDY clang-tidy)
 
 add_library(flute "")
 target_sources(flute
   PRIVATE
-    src/Receiver.cpp src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp
+    src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp
+    src/ReceiverBase.cpp src/Receiver.cpp src/PcapReceiver.cpp
     src/File.cpp src/File_FEC_CompactNoCode.cpp
     utils/base64.cpp
   PUBLIC
@@ -57,6 +61,7 @@ target_link_libraries( flute
     z
     pthread
     crypto
+    ${PCAP_LIBRARY}
     PkgConfig::TINYXML
     PkgConfig::NETLINK
 )

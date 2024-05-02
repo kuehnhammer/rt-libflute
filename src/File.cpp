@@ -71,8 +71,9 @@ LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_m
   , _enable_md5(enable_md5)
   , _received_at( time(nullptr) )
 {
+  spdlog::debug("Creating File from FileEntry");
   // Allocate a data buffer
-  _buffer = (char*)malloc(_meta.content_length);
+  _buffer = (char*)malloc(_meta.fec_oti.transfer_length);
   if (_buffer == nullptr)
   {
     throw "Failed to allocate file buffer";
@@ -91,7 +92,9 @@ LibFlute::File::File(uint32_t toi,
     bool enable_md5) 
   : _enable_md5(enable_md5)
 {
+  spdlog::debug("Creating File from data");
   if (copy_data) {
+    spdlog::debug("Allocating buffer");
     _buffer = (char*)malloc(length);
     if (_buffer == nullptr)
     {
@@ -119,8 +122,10 @@ LibFlute::File::File(uint32_t toi,
 
 LibFlute::File::~File()
 {
+  spdlog::debug("Destroying File");
   if (_own_buffer && _buffer != nullptr)
   {
+    spdlog::debug("Freeing buffer");
     free(_buffer);
   }
 }
