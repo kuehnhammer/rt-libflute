@@ -45,10 +45,16 @@ LibFlute::PcapReceiver::PcapReceiver ( const std::string& pcap_file, const std::
     throw std::runtime_error("Can't open PCAP file: " + std::string(errbuf));
   }
 
+  auto secs_since_epoch = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::system_clock::now().time_since_epoch())
+    .count();
   // Get the first packet to establish a time base
   read_packet();
   if (_packet_data != nullptr) {
+    spdlog::info("First packet timestamp {}, current timestamp {}: file age is {} secs", 
+        _packet_header.ts.tv_sec, secs_since_epoch, (secs_since_epoch - _packet_header.ts.tv_sec));
     _last_packet_time = tv_to_usecs(&_packet_header.ts);
+    _packet_offset = secs_since_epoch - _packet_header.ts.tv_sec;
   } else {
     throw std::runtime_error("No packets found in file");
   }

@@ -5,7 +5,7 @@ project (libflute VERSION 0.11.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-option(ENABLE_RAPTOR10    "Enable support for Raptor10 FEC"     OFF)
+option(ENABLE_RAPTOR10    "Enable support for Raptor10 FEC"     ON)
 
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror -g3")
 set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")

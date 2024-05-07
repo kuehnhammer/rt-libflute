@@ -86,6 +86,7 @@ namespace LibFlute {
       */
       virtual void stop() = 0;
 
+      virtual size_t packet_offset() const { return _packet_offset; };
     protected:
      /**
       *  Decoding incoming data. To be called by derived class with packet payload.
@@ -95,6 +96,7 @@ namespace LibFlute {
       std::string _mcast_address = {};
       unsigned short _mcast_port = {};
       uint64_t _tsi;
+      size_t _packet_offset = 0;
 
     private:
       std::unique_ptr<LibFlute::FileDeliveryTable> _fdt;
@@ -103,5 +105,6 @@ namespace LibFlute {
 
       completion_callback_t _completion_cb = nullptr;
       bool _enable_md5 = true;
+
   };
 };
