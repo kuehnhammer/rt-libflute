@@ -32,9 +32,8 @@ namespace LibFlute {
        *  Create a file from an FDT entry (used for reception) - factory method
        *
        *  @param entry FDT entry
-       *  @param enable_md5 Enable md5sum verification
        */
-      static std::shared_ptr<File> create_file(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5 = true);
+      static std::shared_ptr<File> create_file(LibFlute::FileDeliveryTable::FileEntry entry);
 
       /**
        *  Create a file from the given parameters (used for transmission)
@@ -55,8 +54,7 @@ namespace LibFlute {
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data = false,
-          bool enable_md5 = true);
+          bool copy_data = false);
 
       /**
        *  Default destructor.
@@ -139,8 +137,10 @@ namespace LibFlute {
        */
       virtual void reset() = 0;
 
+      virtual void dump_status() {};
+
     protected:
-      File(FileDeliveryTable::FileEntry entry, bool enable_md5);
+      File(FileDeliveryTable::FileEntry entry);
       File(uint32_t toi, 
           FecOti fec_oti,
           std::string content_location,
@@ -148,8 +148,7 @@ namespace LibFlute {
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data,
-          bool enable_md5);
+          bool copy_data);
 
       void check_md5();
 
@@ -164,6 +163,5 @@ namespace LibFlute {
 
       uint16_t _fdt_instance_id = 0;
 
-      bool _enable_md5 = false;
   };
 };

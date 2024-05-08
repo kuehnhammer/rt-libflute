@@ -46,7 +46,7 @@ namespace LibFlute {
       *  @param io_service Boost io_service to run the socket operations in (must be provided by the caller)
       */
       PcapReceiver( const std::string& pcap_file, const std::string& address, 
-          unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, unsigned skip_ms = 0);
+          unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, int skip_ms = 0);
 
      /**
       *  Destructor.
@@ -69,5 +69,7 @@ namespace LibFlute {
       struct pcap_pkthdr _packet_header = {};
 
       boost::asio::deadline_timer _packet_timer;
+      long _skip_us = 0;
+      long _total_time = 0;
   };
 };

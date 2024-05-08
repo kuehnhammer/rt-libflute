@@ -22,9 +22,10 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
-#include <openssl/md5.h>
 #include "base64.h"
 #include "spdlog/spdlog.h"
+#define CRYPTOPP_ENABLE_NAMESPACE_WEAK 1
+#include "crypto++/md5.h"
 
 #include "File_FEC_CompactNoCode.h"
 
@@ -32,12 +33,12 @@
 #include "File_FEC_Raptor10.h"
 #endif
 
-std::shared_ptr<LibFlute::File> LibFlute::File::create_file(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5)
+std::shared_ptr<LibFlute::File> LibFlute::File::create_file(LibFlute::FileDeliveryTable::FileEntry entry)
 {
   switch (entry.fec_oti.encoding_id) {
-    case FecScheme::CompactNoCode: return std::make_shared<LibFlute::File_FEC_CompactNoCode>(std::move(entry), enable_md5);
+    case FecScheme::CompactNoCode: return std::make_shared<LibFlute::File_FEC_CompactNoCode>(std::move(entry));
 #ifdef ENABLE_RAPTOR10
-    case FecScheme::Raptor10: return std::make_shared<LibFlute::File_FEC_Raptor10>(std::move(entry), enable_md5);
+    case FecScheme::Raptor10: return std::make_shared<LibFlute::File_FEC_Raptor10>(std::move(entry));
 #endif
     default: return nullptr;
   }
@@ -50,35 +51,26 @@ std::shared_ptr<LibFlute::File> LibFlute::File::create_file(uint32_t toi,
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data,
-          bool enable_md5)
+          bool copy_data)
 {
   switch (fec_oti.encoding_id) {
     case FecScheme::CompactNoCode: return std::make_shared<LibFlute::File_FEC_CompactNoCode>(
          toi, std::move(fec_oti), std::move(content_location), std::move(content_type), expires, 
-         data, length, copy_data, enable_md5);
+         data, length, copy_data);
 #ifdef ENABLE_RAPTOR10
     case FecScheme::Raptor10: return std::make_shared<LibFlute::File_FEC_Raptor10>(
          toi, std::move(fec_oti), std::move(content_location), std::move(content_type), expires, 
-         data, length, copy_data, enable_md5);
+         data, length, copy_data);
 #endif
     default: return nullptr;
   }
 }
 
-LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5)
+LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry)
   : _meta(std::move(entry))
-  , _enable_md5(enable_md5)
   , _received_at( time(nullptr) )
 {
-  spdlog::debug("Creating File from FileEntry");
-  // Allocate a data buffer
-  _buffer = (char*)malloc(_meta.fec_oti.transfer_length);
-  if (_buffer == nullptr)
-  {
-    throw "Failed to allocate file buffer";
-  }
-  _own_buffer = true;
+  spdlog::debug("Creating File from FileEntry ({} bytes)", _meta.fec_oti.transfer_length);
 }
 
 LibFlute::File::File(uint32_t toi,
@@ -88,9 +80,7 @@ LibFlute::File::File(uint32_t toi,
     uint64_t expires,
     char* data,
     size_t length,
-    bool copy_data, 
-    bool enable_md5) 
-  : _enable_md5(enable_md5)
+    bool copy_data) 
 {
   spdlog::debug("Creating File from data");
   if (copy_data) {
@@ -113,11 +103,12 @@ LibFlute::File::File(uint32_t toi,
   _meta.expires = expires;
   _meta.fec_oti = std::move(fec_oti);
 
-  if (_enable_md5) {
-    unsigned char md5[MD5_DIGEST_LENGTH];
-    MD5((const unsigned char*)data, length, md5);
-    _meta.content_md5 = base64_encode(md5, MD5_DIGEST_LENGTH);
-  }
+  std::string digest;
+  CryptoPP::Weak::MD5 hash;
+  hash.Update((const CryptoPP::byte*)data, length);
+  digest.resize(hash.DigestSize());
+  hash.Final((CryptoPP::byte*)&digest[0]);
+  _meta.content_md5 = base64_encode(digest);
 }
 
 LibFlute::File::~File()
@@ -133,11 +124,16 @@ LibFlute::File::~File()
 auto LibFlute::File::check_md5() -> void 
 {
   if (_complete && !_meta.content_md5.empty()) {
-    unsigned char md5[MD5_DIGEST_LENGTH];
-    MD5((const unsigned char*)buffer(), length(), md5);
+
+    std::string digest;
+    CryptoPP::Weak::MD5 hash;
+    hash.Update((const CryptoPP::byte*)buffer(), length());
+    digest.resize(hash.DigestSize());
+    hash.Final((CryptoPP::byte*)&digest[0]);
 
     auto content_md5 = base64_decode(_meta.content_md5);
-    if (memcmp(md5, content_md5.c_str(), MD5_DIGEST_LENGTH) != 0) {
+    if (digest != content_md5) {
+      spdlog::info("MD5 mismatch, discarding");
       reset();
     }
   }

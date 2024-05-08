@@ -14,7 +14,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 find_package(Boost REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(PkgConfig REQUIRED)
-find_package(OpenSSL REQUIRED)
+find_package(CryptoPP REQUIRED)
 find_package(PCAP REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
@@ -51,6 +51,7 @@ target_sources(flute
 target_include_directories(flute
   PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/include/
+    ${CMAKE_CURRENT_LIST_DIR}/lib/
   )
 
 #add_library(flute src/Receiver.cpp src/Receiver.h src/AlcPacket.cpp src/File.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp)
@@ -58,9 +59,8 @@ target_include_directories(flute
 target_link_libraries( flute
     LINK_PUBLIC
     spdlog::spdlog
-    z
+    CryptoPP::CryptoPP
     pthread
-    crypto
     ${PCAP_LIBRARY}
     PkgConfig::TINYXML
     PkgConfig::NETLINK
@@ -68,20 +68,23 @@ target_link_libraries( flute
 
 if (ENABLE_RAPTOR10)
   add_definitions(-DENABLE_RAPTOR10)
-  add_subdirectory(lib/raptor10)
-  include_directories(
-    SYSTEM
-    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
+
+  add_library(raptor10 STATIC)
+  target_sources(raptor10
+    PRIVATE
+    lib/raptor10/bipartite.c lib/raptor10/decoder.c lib/raptor10/encoder.c lib/raptor10/galois.c 
+    lib/raptor10/gaussian.c lib/raptor10/pivoting.c lib/raptor10/random.c
+    PUBLIC
+    lib/raptor10/raptor.h
     )
+  target_link_libraries(raptor10 LINK_PUBLIC m)
+
   target_sources(flute
     PRIVATE
     src/File_FEC_Raptor10.cpp
     )
-  link_directories(
-    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
-    )
   target_link_libraries( flute
     LINK_PUBLIC
-    raptor
+        raptor10
     )
 endif (ENABLE_RAPTOR10)

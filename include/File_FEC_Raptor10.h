@@ -16,15 +16,13 @@
 #pragma once
 
 #include "File.h"
-#include "Array_Data_Types.h"
+#include <cmath>
+#include "raptor10/raptor.h"
 
 namespace LibFlute {
-  /**
-   *  Represents a file being transmitted or received using Compact-No Code FEC
-   */
   class File_FEC_Raptor10 : public File {
     public:
-      File_FEC_Raptor10(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5);
+      File_FEC_Raptor10(LibFlute::FileDeliveryTable::FileEntry entry);
       File_FEC_Raptor10(uint32_t toi, 
           FecOti fec_oti,
           std::string content_location,
@@ -32,48 +30,57 @@ namespace LibFlute {
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data,
-          bool enable_md5);
+          bool copy_data);
       virtual ~File_FEC_Raptor10() = default;
 
       virtual void put_symbol(const EncodingSymbol& symbol) override;
       virtual std::vector<EncodingSymbol> get_next_symbols(size_t max_size) override;
       virtual void mark_completed(const std::vector<EncodingSymbol>& symbols, bool success) override;
       virtual void reset() override;
+      virtual void dump_status() override;
 
     private:
+      static std::array<unsigned, 4> partition(unsigned i, unsigned j);
       void calculate_partitioning();
       void create_blocks();
 
-      struct SourceBlock {
-        bool complete = false;
-        struct SourceSymbol {
-          char* data;
-          size_t length;
-          bool complete = false;
-          bool queued = false;
-        };
-        struct RepairSymbol {
-          bool complete = false;
-          bool queued = false;
-        };
-        std::map<uint16_t, SourceSymbol> symbols; 
-        std::map<uint16_t, RepairSymbol> repair_symbols; 
-        std::shared_ptr<Array_Data_Symbol> raptor_src_symbols;
-        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
+      struct SubSymbol {
+        size_t size;
+        char* data;
       };
+
+      struct SubBlock {
+        std::vector<SubSymbol> sub_symbols;
+      };
+
+      struct SourceBlock {
+        unsigned sbn;
+        size_t size;
+        size_t nr_of_symbols;
+        bool complete = false;
+        std::vector<SubBlock> sub_blocks;
+        std::vector<bool> completed_symbols;
+        };
+      //  std::map<uint16_t, SourceSymbol> symbols; 
+      //  std::map<uint16_t, RepairSymbol> repair_symbols; 
+//        std::shared_ptr<Array_Data_Symbol> raptor_src_symbols;
+//        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
       std::map<uint16_t, SourceBlock> _source_blocks; 
 
       void check_source_block_completion(SourceBlock& block);
       void check_file_completion();
 
       uint8_t _symbol_alignment = 0;
+
       uint32_t _nof_source_blocks = 0;
-      uint8_t _nof_sub_blocks = 0;
-      uint32_t _nof_source_symbols = 0;
       uint32_t _nof_large_source_blocks = 0;
       uint32_t _large_source_block_length = 0;
       uint32_t _small_source_block_length = 0;
+
+      uint32_t _nof_sub_blocks = 0;
+      uint32_t _nof_large_sub_blocks = 0;
+      uint32_t _large_sub_block_symbol_size = 0;
+      uint32_t _small_sub_block_symbol_size = 0;
 
       bool _receiving;
   };

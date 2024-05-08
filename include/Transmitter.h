@@ -110,8 +110,8 @@ namespace LibFlute {
       void file_transmitted(uint32_t toi);
 
       void handle_send_to(const boost::system::error_code& error);
-      boost::asio::ip::udp::socket _socket;
       boost::asio::ip::udp::endpoint _endpoint;
+      boost::asio::ip::udp::socket _socket;
       boost::asio::io_service& _io_service;
       boost::asio::deadline_timer _send_timer;
       boost::asio::deadline_timer _fdt_timer;

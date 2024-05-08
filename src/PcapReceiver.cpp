@@ -34,9 +34,10 @@
 
 
 LibFlute::PcapReceiver::PcapReceiver ( const std::string& pcap_file, const std::string& address,
-    unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, unsigned skip_ms)
+    unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, int skip_ms)
   : ReceiverBase(address, port, tsi)
   , _packet_timer( io_service )
+  , _skip_us( skip_ms * 1000 )
 {
   char errbuf[PCAP_ERRBUF_SIZE];
 
@@ -45,22 +46,24 @@ LibFlute::PcapReceiver::PcapReceiver ( const std::string& pcap_file, const std::
     throw std::runtime_error("Can't open PCAP file: " + std::string(errbuf));
   }
 
-  auto secs_since_epoch = std::chrono::duration_cast<std::chrono::seconds>(
-      std::chrono::system_clock::now().time_since_epoch())
-    .count();
+  spdlog::info("skip {} ms", _skip_us);
   // Get the first packet to establish a time base
   read_packet();
+
   if (_packet_data != nullptr) {
+    _started_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
     spdlog::info("First packet timestamp {}, current timestamp {}: file age is {} secs", 
-        _packet_header.ts.tv_sec, secs_since_epoch, (secs_since_epoch - _packet_header.ts.tv_sec));
+        _packet_header.ts.tv_sec, _started_at/1000.0, (std::floor(_started_at / 1000.0) - _packet_header.ts.tv_sec));
     _last_packet_time = tv_to_usecs(&_packet_header.ts);
-    _packet_offset = secs_since_epoch - _packet_header.ts.tv_sec;
+    _packet_offset = _started_at - _last_packet_time/1000.0;
   } else {
     throw std::runtime_error("No packets found in file");
   }
 
   // start processing the file
-  process_packet();
+  _packet_timer.expires_from_now(boost::posix_time::microseconds(10));
+  _packet_timer.async_wait( boost::bind(&PcapReceiver::process_packet, this)); //NOLINT
 }
 
 LibFlute::PcapReceiver::~PcapReceiver() {
@@ -73,6 +76,9 @@ auto LibFlute::PcapReceiver::process_packet() -> void
 {
   assert(_packet_data != nullptr);
 
+    auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
   // Check if the destination matches the mcast address and port we need and
   // pass the payload on for FLUTE decoding if it does
   check_packet();
@@ -81,15 +87,22 @@ auto LibFlute::PcapReceiver::process_packet() -> void
   read_packet();
 
   if (_packet_data == nullptr) {
-    spdlog::info("Last packet processed, exiting.");
+    spdlog::info("Last packet processed, exiting. Total time was {} secs.", _total_time/1000000.0);
   } else {
     // Calculate how long we have to wait until processing the next packet
     auto packet_time = tv_to_usecs(&_packet_header.ts);
     auto delta = packet_time - _last_packet_time;
     _last_packet_time = packet_time;
 
-    _packet_timer.expires_from_now(boost::posix_time::microseconds(delta));
-    _packet_timer.async_wait( boost::bind(&PcapReceiver::process_packet, this)); //NOLINT
+    _total_time += delta;
+
+    if (_skip_us > 0) {
+      _skip_us -= delta;
+      delta = 0;
+    }
+
+    _packet_timer.expires_at(_packet_timer.expires_at() + boost::posix_time::microseconds(delta));
+    _packet_timer.async_wait(boost::bind(&PcapReceiver::process_packet, this)); //NOLINT
   }
 }
 
@@ -109,7 +122,7 @@ auto LibFlute::PcapReceiver::check_packet() -> void
   auto dest_address = std::string(inet_ntoa(ip_header->ip_dst));
   auto dest_port = ntohs(udp_header->uh_dport);
 
-  if (dest_address == _mcast_address && dest_port == _mcast_port) {
+  if (_skip_us <= 0 && dest_address == _mcast_address && dest_port == _mcast_port) {
     auto payload = (_packet_data + (ip_header->ip_hl * 4) + sizeof(struct udphdr));
     handle_received_packet((char*)payload, ntohs(udp_header->uh_ulen) - sizeof(struct udphdr));
   }

@@ -18,10 +18,19 @@
 #include <cassert>
 #include <algorithm>
 
-LibFlute::File_FEC_CompactNoCode::File_FEC_CompactNoCode(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5)
-  : File( std::move(entry), enable_md5 )
+LibFlute::File_FEC_CompactNoCode::File_FEC_CompactNoCode(LibFlute::FileDeliveryTable::FileEntry entry)
+  : File( std::move(entry) )
 {
   calculate_partitioning();
+
+  // Allocate a data buffer
+  _buffer = (char*)malloc(_meta.fec_oti.transfer_length);
+  if (_buffer == nullptr)
+  {
+    throw "Failed to allocate file buffer";
+  }
+  _own_buffer = true;
+
   create_blocks();
 }
 
@@ -32,10 +41,9 @@ LibFlute::File_FEC_CompactNoCode::File_FEC_CompactNoCode(uint32_t toi,
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data,
-          bool enable_md5)
+          bool copy_data)
   : File(toi, std::move(fec_oti), std::move(content_location), std::move(content_type), 
-          expires, data, length, copy_data, enable_md5)
+          expires, data, length, copy_data)
 {
   _meta.fec_oti.transfer_length = _meta.content_length;
   calculate_partitioning();
@@ -107,9 +115,7 @@ auto LibFlute::File_FEC_CompactNoCode::check_source_block_completion( SourceBloc
 auto LibFlute::File_FEC_CompactNoCode::check_file_completion() -> void
 {
   _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(), [](const auto& block){ return block.second.complete; });
-  if (_enable_md5) {
-    check_md5();
-  }
+  check_md5();
 }
 
 auto LibFlute::File_FEC_CompactNoCode::get_next_symbols(size_t max_size) -> std::vector<EncodingSymbol> 

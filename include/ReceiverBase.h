@@ -49,8 +49,7 @@ namespace LibFlute {
       *  @param port Target port 
       *  @param tsi TSI value of the session 
       */
-      ReceiverBase ( const std::string& address, unsigned short port, uint64_t tsi,
-          bool enable_md5 = true);
+      ReceiverBase ( const std::string& address, unsigned short port, uint64_t tsi);
 
      /**
       *  Default destructor.
@@ -87,6 +86,7 @@ namespace LibFlute {
       virtual void stop() = 0;
 
       virtual size_t packet_offset() const { return _packet_offset; };
+      virtual size_t started_at() const { return _started_at; };
     protected:
      /**
       *  Decoding incoming data. To be called by derived class with packet payload.
@@ -96,15 +96,19 @@ namespace LibFlute {
       std::string _mcast_address = {};
       unsigned short _mcast_port = {};
       uint64_t _tsi;
-      size_t _packet_offset = 0;
+      size_t _packet_offset = 0; // in ms
+      uint64_t _started_at;
 
     private:
+      void handle_completed_file(const std::shared_ptr<LibFlute::File>& file);
       std::unique_ptr<LibFlute::FileDeliveryTable> _fdt;
       std::map<uint64_t, std::shared_ptr<LibFlute::File>> _files;
       std::mutex _files_mutex;
 
       completion_callback_t _completion_cb = nullptr;
-      bool _enable_md5 = true;
+
+      bool _receiving_fdt = false;
+      uint32_t _current_fdt_instance = 0;
 
   };
 };

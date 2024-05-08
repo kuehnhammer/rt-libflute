@@ -23,7 +23,7 @@ namespace LibFlute {
    */
   class File_FEC_CompactNoCode : public File {
     public:
-      File_FEC_CompactNoCode(LibFlute::FileDeliveryTable::FileEntry entry, bool enable_md5);
+      File_FEC_CompactNoCode(LibFlute::FileDeliveryTable::FileEntry entry);
       File_FEC_CompactNoCode(uint32_t toi, 
           FecOti fec_oti,
           std::string content_location,
@@ -31,8 +31,7 @@ namespace LibFlute {
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data,
-          bool enable_md5);
+          bool copy_data);
       virtual ~File_FEC_CompactNoCode() = default;
 
       virtual void put_symbol(const EncodingSymbol& symbol) override;

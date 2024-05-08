@@ -32,14 +32,64 @@
 
 
 LibFlute::ReceiverBase::ReceiverBase ( const std::string& address,
-    unsigned short port, uint64_t tsi, bool enable_md5)
+    unsigned short port, uint64_t tsi)
     : _mcast_address(address)
     , _mcast_port(port)
     , _tsi(tsi)
-    , _enable_md5(enable_md5)
 {
 }
 
+
+auto LibFlute::ReceiverBase::handle_completed_file(const std::shared_ptr<LibFlute::File>& file)
+  -> void
+{
+  auto toi = file->meta().toi;
+  spdlog::debug("File with TOI {} completed", toi);
+  if (toi != 0 && _completion_cb) {
+    _completion_cb(file);
+  }
+
+  if (toi == 0) { // parse complete FDT
+    _fdt = std::make_unique<LibFlute::FileDeliveryTable>(
+        _current_fdt_instance, file->buffer(), file->length());
+
+    // check for new files
+    for (const auto& file_entry : _fdt->file_entries()) {
+      spdlog::info("FDT instance {}: {}", _fdt->instance_id(), file_entry.content_location);
+      // automatically receive all files in the FDT
+      if (_files.find(file_entry.toi) == _files.end()) {
+        spdlog::info("Starting reception for file with TOI {}: {} ({})", file_entry.toi,
+            file_entry.content_location, file_entry.content_type);
+        auto file = LibFlute::File::create_file(file_entry);
+        if (file) { 
+          _files.emplace(file_entry.toi, file);
+        }
+      }
+    }
+
+    //check for files that are no longer announced, but were not completed
+    for (auto file_it = _files.begin(); file_it != _files.end(); ) {
+      bool still_present = false;
+      for (const auto& file_entry : _fdt->file_entries()) {
+        if (file_entry.toi == file_it->second->meta().toi) {
+          still_present = true;
+          break;
+        }
+      }
+
+      if (still_present || file_it->second->complete()) {
+        ++file_it;
+      } else {
+        spdlog::info("File with TOI {} is no longer in the FDT", file_it->first);
+        file_it->second->dump_status();
+        file_it = _files.erase(file_it);
+      }
+
+    } 
+  }
+
+   _files.erase(toi);
+}
 
 auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) -> void
 {
@@ -53,13 +103,14 @@ auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) ->
 
     const std::lock_guard<std::mutex> lock(_files_mutex);
 
-    if (alc.toi() == 0 && (!_fdt || _fdt->instance_id() != alc.fdt_instance_id())) {
-      if (_files.find(alc.toi()) == _files.end()) {
-        FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti()};
-        auto file = LibFlute::File::create_file(fe, _enable_md5);
-        if (file) { 
-          _files.emplace(alc.toi(), file);
-        }
+    if (alc.toi() == 0 && (!_receiving_fdt || _current_fdt_instance != alc.fdt_instance_id())) {
+      _receiving_fdt = true;
+      _current_fdt_instance = alc.fdt_instance_id();
+      _files.erase(alc.toi());
+      FileDeliveryTable::FileEntry fe{0, "", static_cast<uint32_t>(alc.fec_oti().transfer_length), "", "", 0, alc.fec_oti()};
+      auto file = LibFlute::File::create_file(fe);
+      if (file) { 
+        _files.emplace(alc.toi(), file);
       }
     }
 
@@ -71,53 +122,16 @@ auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) ->
           alc.content_encoding());
 
       for (const auto& symbol : encoding_symbols) {
-
-        spdlog::debug("received TOI {} SBN {} ID {}", alc.toi(), symbol.source_block_number(), symbol.id() );
+        spdlog::debug("received TOI {} SBN {} ID {}", 
+            alc.toi(), symbol.source_block_number(), symbol.id() );
         _files[alc.toi()]->put_symbol(symbol);
       }
 
       auto* file = _files[alc.toi()].get();
       if (_files[alc.toi()]->complete()) {
-        for (auto it = _files.begin(); it != _files.end();)
-        {
-          if (it->second.get() != file && it->second->meta().content_location == file->meta().content_location)
-          {
-            spdlog::debug("Replacing file with TOI {}", it->first);
-            it = _files.erase(it);
-          }
-          else
-          {
-            ++it;
-          }
-        }
-
-        spdlog::debug("File with TOI {} completed", alc.toi());
-        if (alc.toi() != 0 && _completion_cb) {
-          _completion_cb(_files[alc.toi()]);
-          _files.erase(alc.toi());
-        }
-
-        if (alc.toi() == 0) { // parse complete FDT
-          _fdt = std::make_unique<LibFlute::FileDeliveryTable>(
-              alc.fdt_instance_id(), _files[alc.toi()]->buffer(), _files[alc.toi()]->length());
-
-          _files.erase(alc.toi());
-          for (const auto& file_entry : _fdt->file_entries()) {
-            // automatically receive all files in the FDT
-            if (_files.find(file_entry.toi) == _files.end()) {
-              spdlog::debug("Starting reception for file with TOI {}: {} ({})", file_entry.toi,
-                  file_entry.content_location, file_entry.content_type);
-              auto file = LibFlute::File::create_file(file_entry, _enable_md5);
-              if (file) { 
-                _files.emplace(file_entry.toi, file);
-              }
-            }
-          }
-        }
+        handle_completed_file(_files[alc.toi()]);
       }
-    } else {
-      spdlog::trace("Discarding packet for unknown or already completed file with TOI {}", alc.toi());
-    }
+    } 
   } catch (std::exception& ex) {
     spdlog::warn("Failed to decode ALC/FLUTE packet: {}", ex.what());
   }
