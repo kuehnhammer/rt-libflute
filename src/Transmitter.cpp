@@ -55,11 +55,6 @@ LibFlute::Transmitter::Transmitter ( const std::string& address,
 
 LibFlute::Transmitter::~Transmitter() = default;
 
-auto LibFlute::Transmitter::enable_ipsec(uint32_t spi, const std::string& key) -> void 
-{
-  LibFlute::IpSec::enable_esp(spi, _mcast_address, LibFlute::IpSec::Direction::Out, key);
-}
-
 auto LibFlute::Transmitter::handle_send_to(const boost::system::error_code& error) -> void
 {
   if (!error) {

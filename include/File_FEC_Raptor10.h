@@ -16,8 +16,9 @@
 #pragma once
 
 #include "File.h"
+#include "R10_Decoder.h"
+#include "Array_Data_Types.h"
 #include <cmath>
-#include "raptor10/raptor.h"
 
 namespace LibFlute {
   class File_FEC_Raptor10 : public File {
@@ -50,7 +51,11 @@ namespace LibFlute {
       };
 
       struct SubBlock {
+        size_t symbol_size;
         std::vector<SubSymbol> sub_symbols;
+        std::shared_ptr<R10_Decoder> raptor_decoder;
+        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
+        bool complete = false;
       };
 
       struct SourceBlock {
@@ -59,12 +64,10 @@ namespace LibFlute {
         size_t nr_of_symbols;
         bool complete = false;
         std::vector<SubBlock> sub_blocks;
-        std::vector<bool> completed_symbols;
         };
       //  std::map<uint16_t, SourceSymbol> symbols; 
       //  std::map<uint16_t, RepairSymbol> repair_symbols; 
 //        std::shared_ptr<Array_Data_Symbol> raptor_src_symbols;
-//        std::shared_ptr<Array_Data_Symbol> raptor_enc_symbols;
       std::map<uint16_t, SourceBlock> _source_blocks; 
 
       void check_source_block_completion(SourceBlock& block);

@@ -181,12 +181,6 @@ auto main(int argc, char **argv) -> int {
           arguments.tsi,
           io);
 
-      // Configure IPSEC, if enabled
-      if (arguments.enable_ipsec) 
-      {
-        net_receiver->enable_ipsec(1, arguments.aes_key);
-      }
-
       receiver = net_receiver;
     }
 

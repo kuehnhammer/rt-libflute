@@ -80,7 +80,8 @@ auto LibFlute::ReceiverBase::handle_completed_file(const std::shared_ptr<LibFlut
       if (still_present || file_it->second->complete()) {
         ++file_it;
       } else {
-        spdlog::info("File with TOI {} is no longer in the FDT", file_it->first);
+        spdlog::info("Incomplete file with TOI {} is no longer in the FDT, giving up and discarding it", 
+            file_it->first);
         file_it->second->dump_status();
         file_it = _files.erase(file_it);
       }

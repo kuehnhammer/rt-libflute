@@ -56,10 +56,6 @@ LibFlute::Receiver::Receiver ( const std::string& iface, const std::string& addr
           boost::asio::placeholders::bytes_transferred));
 }
 
-auto LibFlute::Receiver::enable_ipsec(uint32_t spi, const std::string& key) -> void 
-{
-  LibFlute::IpSec::enable_esp(spi, _mcast_address, LibFlute::IpSec::Direction::In, key);
-}
 
 auto LibFlute::Receiver::handle_receive_from(const boost::system::error_code& error,
     size_t bytes_recvd) -> void

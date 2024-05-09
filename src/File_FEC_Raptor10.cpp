@@ -174,16 +174,25 @@ auto LibFlute::File_FEC_Raptor10::create_blocks() -> void
         _large_source_block_length : _small_source_block_length,
       .nr_of_symbols = block.size / _meta.fec_oti.encoding_symbol_length
     };
-    block.completed_symbols.resize(block.nr_of_symbols);
 
     spdlog::debug("Source block {}: {} bytes, K: {}", block.sbn, block.size, block.nr_of_symbols);
 
     for (auto sub_block_nr = 0U; sub_block_nr < _nof_sub_blocks; sub_block_nr++) {
       SubBlock sub_block;
-      spdlog::debug("Sub block {}", sub_block_nr);
 
       size_t sub_symbol_size = (sub_block_nr < _nof_large_sub_blocks) ? 
         _large_sub_block_symbol_size : _small_sub_block_symbol_size;
+
+      sub_block.symbol_size = sub_symbol_size;
+
+      sub_block.raptor_decoder = 
+        std::make_shared<R10_Decoder>(block.nr_of_symbols, sub_symbol_size);
+      
+      sub_block.raptor_enc_symbols = 
+        std::make_shared<Array_Data_Symbol>(block.nr_of_symbols);
+      sub_block.raptor_enc_symbols->sym_len = sub_symbol_size;
+
+      spdlog::debug("Sub block {}", sub_block_nr);
 
       for (auto sub_symbol_idx = 0U; sub_symbol_idx < block.nr_of_symbols; sub_symbol_idx++) {
         SubSymbol sub_symbol {
@@ -211,73 +220,68 @@ auto LibFlute::File_FEC_Raptor10::put_symbol( const LibFlute::EncodingSymbol& sy
     throw "Source Block number too high";
   } 
   auto& source_block = _source_blocks[ symbol.source_block_number() ];
-
-  if (symbol.id() >= source_block.nr_of_symbols) {
-    // handle repair symbol
+  if (source_block.complete) {
     return;
-  } 
+  }
 
   auto* received_data = symbol.buffer();
   for (auto& sub_block : source_block.sub_blocks) {
-    memcpy(sub_block.sub_symbols[symbol.id()].data, received_data, 
-        sub_block.sub_symbols[symbol.id()].size);
+    if (sub_block.complete) {
+      continue;
+    }
+    sub_block.raptor_enc_symbols->ESIs.push_back(symbol.id());
+    sub_block.raptor_enc_symbols->symbol.emplace_back(sub_block.symbol_size);
+    sub_block.raptor_enc_symbols->symbol.back().data_reading( symbol.buffer() );
+
+    //if (symbol.id() < source_block.nr_of_symbols) {
+    //  memcpy(sub_block.sub_symbols[symbol.id()].data, received_data, 
+    //      sub_block.sub_symbols[symbol.id()].size);
+    //}
+
+    if (sub_block.raptor_enc_symbols->ESIs.size() >= source_block.nr_of_symbols) {
+      // attempt to decode
+      try {
+        auto decoded_symbols = sub_block.raptor_decoder->Get_Source_Symbol(
+            *(sub_block.raptor_enc_symbols.get()), 
+            sub_block.raptor_enc_symbols->ESIs.size());
+
+        for (auto i = 0U; i < source_block.nr_of_symbols; i++) {
+      //    spdlog::info("recvd: {:02x}", fmt::join(std::vector<uint8_t>(sub_block.sub_symbols[i].data, 
+      //            sub_block.sub_symbols[i].data + sub_block.symbol_size), " "));
+          memcpy(sub_block.sub_symbols[i].data, 
+              decoded_symbols.symbol[i].s.data(), 
+              sub_block.symbol_size);
+      //    spdlog::info("dec'd: {:02x}", fmt::join(std::vector<uint8_t>(sub_block.sub_symbols[i].data, 
+      //            sub_block.sub_symbols[i].data + sub_block.symbol_size), " "));
+        }
+        sub_block.complete = true;
+        spdlog::debug("R10 decoding of TOI {} SBN {} succeded at ESI {}", 
+            _meta.toi, symbol.source_block_number(), symbol.id());
+      } catch(const char* ex) {
+        spdlog::debug("R10 decoding of TOI {} SBN {} failed at ESI {}: {}", 
+            _meta.toi, symbol.source_block_number(), symbol.id(), ex);
+      }
+    }
     received_data += sub_block.sub_symbols[symbol.id()].size;
   }
-  source_block.completed_symbols[symbol.id()] = true;
 
   check_source_block_completion(source_block);
   check_file_completion();
-  // if (symbol.id() == 2) return; // intentionally drop a symbol for testing purposes
-
-  //source_block.raptor_enc_symbols->ESIs.push_back(symbol.id());
-  //source_block.raptor_enc_symbols->symbol.emplace_back(_meta.fec_oti.encoding_symbol_length);
-  //source_block.raptor_enc_symbols->symbol.back().data_reading( symbol.buffer() );
-
-#if 0
-  if (!source_block.complete &&
-      source_block.raptor_enc_symbols->ESIs.size() >= source_block.symbols.size()) {
-    // attempt to decode
-    try {
-      R10_Decoder decoder(source_block.symbols.size(), _meta.fec_oti.encoding_symbol_length);
-      auto source = decoder.Get_Source_Symbol(*source_block.raptor_enc_symbols.get(), source_block.raptor_enc_symbols->ESIs.size());
-      spdlog::trace("R10 decoding succeeded for TOI {} SBN {}, {} symbols", 
-          _meta.toi, symbol.source_block_number(),
-          source_block.symbols.size());
-
-      for (int i = 0; i < source_block.symbols.size(); i++) {
-        auto& target_symbol = source_block.symbols[i];
-        memcpy(target_symbol.data, &(source.symbol[i].s[0]), target_symbol.length);
-        target_symbol.complete = true;
-      }
-    } catch(const char* ex) {
-      spdlog::trace("R10 decoding FAILED for TOI {} SBN {}, {} symbols", 
-          _meta.toi, symbol.source_block_number(),
-          source_block.symbols.size());
-    }
-    check_file_completion();
-  }
-#endif
 } 
 
 auto LibFlute::File_FEC_Raptor10::check_source_block_completion( SourceBlock& block ) -> void
 {
-  block.complete = std::all_of(block.completed_symbols.begin(), block.completed_symbols.end(), 
-      [](bool b) { return b; });
-
-#if 0
-  if (_receiving || block.repair_symbols.size() == 0) {
-    block.complete = src_complete;
-  } else {
-    bool repair_complete = std::all_of(block.repair_symbols.begin(), block.repair_symbols.end(), [](const auto& symbol){ return symbol.second.complete; });
-    block.complete = src_complete && repair_complete;
-  }
-#endif
+  block.complete = std::all_of(block.sub_blocks.begin(), block.sub_blocks.end(), 
+      [](auto& sb) { return sb.complete; });
 }
 auto LibFlute::File_FEC_Raptor10::check_file_completion() -> void
 {
   _complete = std::all_of(_source_blocks.begin(), 
       _source_blocks.end(), [](const auto& block){ return block.second.complete; });
-  check_md5();
+
+  if (_complete) {
+    check_md5();
+  }
 }
 
 auto LibFlute::File_FEC_Raptor10::get_next_symbols(size_t max_size) -> std::vector<EncodingSymbol> 
@@ -326,16 +330,7 @@ auto LibFlute::File_FEC_Raptor10::get_next_symbols(size_t max_size) -> std::vect
 auto LibFlute::File_FEC_Raptor10::dump_status() -> void
 {
   for (auto& [sbn, block] : _source_blocks) {
-    spdlog::info("SBN {}: {}", sbn, block.complete);
-    if (!block.complete) {
-      std::vector<unsigned> symbols;
-      for (auto i = 0U; i < block.nr_of_symbols; i++) {
-        if (!block.completed_symbols[i]) {
-          symbols.push_back(i);
-        }
-      }
-      spdlog::info("Missing symbols: {}", fmt::join(symbols, ", "));
-    }
+    spdlog::debug("SBN {}: {}", sbn, block.complete);
   }
 }
 
@@ -364,13 +359,10 @@ auto LibFlute::File_FEC_Raptor10::mark_completed(const std::vector<EncodingSymbo
 
 auto LibFlute::File_FEC_Raptor10::reset() -> void
 {
-#if 0
-  for (auto& block : _source_blocks) {
-    for (auto& symbol : block.second.symbols) {
-      symbol.second.complete = false;
+  for (auto& [sbn, block] : _source_blocks) {
+    for (auto& sub_block : block.sub_blocks) {
+      sub_block.complete = false;
     }
-    block.second.complete = false;
-  } 
+  }
   _complete = false;
-#endif
 }
