@@ -13,20 +13,21 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <string>
-#include <cstring>
-#include <iostream>
-#include "spdlog/spdlog.h"
-#include <netlink/netlink.h>
-#include <netlink/attr.h>
-#include <netlink/msg.h>
-#include <linux/rtnetlink.h>
-#include <linux/in.h>
-#include <linux/xfrm.h>
-#include <linux/ipsec.h>
-#include <arpa/inet.h>
+
 #include "IpSec.h"
-#include <boost/algorithm/hex.hpp>
+#include <arpa/inet.h>        // for inet_addr
+#include <linux/netlink.h>    // for NETLINK_XFRM, NLMSG_ALIGNTO
+#include <linux/xfrm.h>       // for xfrm_usersa_info, xfrm_user_tmpl, xfrm_...
+#include <netinet/in.h>       // for htonl, INADDR_ANY, IPPROTO_ESP
+#include <netlink/attr.h>     // for nla_put
+#include <netlink/msg.h>      // for nlmsg_alloc_simple, nlmsg_append, nlmsg...
+#include <netlink/netlink.h>  // for nl_connect, nl_send_auto
+#include <netlink/socket.h>   // for nl_socket_alloc
+#include <cstdlib>           // for strtol
+#include <sys/socket.h>       // for AF_INET
+#include <cstring>            // for memcpy, strcpy
+#include <string>             // for string, basic_string
+#include <vector>             // for vector
 
 namespace LibFlute::IpSec {
   void configure_policy(uint32_t spi, const std::string& dest_address, Direction direction)
@@ -67,7 +68,7 @@ namespace LibFlute::IpSec {
     nl_send_auto(sk, msg);
     nlmsg_free(msg);
   }
-  void configure_state(uint32_t spi, const std::string& dest_address, Direction direction, const std::string& key)
+  void configure_state(uint32_t spi, const std::string& dest_address, Direction /*direction*/, const std::string& key)
   {
     struct nl_sock *sk;
     struct nl_msg *msg;
@@ -95,8 +96,8 @@ namespace LibFlute::IpSec {
     xsinfo.mode = XFRM_MODE_TRANSPORT;
 
     struct {
+      char buf[512]; //NOLINT
       struct xfrm_algo xa;
-      char buf[512];
     } algo = {};
 
     std::vector<char> binary_key;
@@ -108,7 +109,7 @@ namespace LibFlute::IpSec {
     }
     strcpy(algo.xa.alg_name, "aes");
     algo.xa.alg_key_len = binary_key.size() * 8;
-    memcpy(algo.buf, &binary_key[0], binary_key.size());
+    memcpy(algo.buf, binary_key.data(), binary_key.size());
 
     msg = nlmsg_alloc_simple(XFRM_MSG_NEWSA, 0);
     nlmsg_append(msg, &xsinfo, sizeof(xsinfo), NLMSG_ALIGNTO);

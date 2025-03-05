@@ -13,8 +13,15 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include <map>
+#include "tinyxml2.h"
+#ifdef RAPTOR_ENABLED
+#include "raptor.h"
+#endif
 
+#pragma once
 /** \mainpage LibFlute - ALC/FLUTE library
  *
  * The library contains two simple **example applications** as a starting point:
@@ -27,6 +34,7 @@
  *
  */
 
+#include <string>
 namespace LibFlute {
   /**
    *  Content Encodings
@@ -39,19 +47,37 @@ namespace LibFlute {
   };
 
   /**
-   *  Error correction schemes 
+   *  Error correction schemes. From the registry for FEC schemes http://www.iana.org/assignments/rmt-fec-parameters (RFC 5052)
    */
   enum class FecScheme {
-    CompactNoCode
+    CompactNoCode,
+    Raptor,
+    Reed_Solomon_GF_2_m,
+    LDPC_Staircase_Codes,
+    LDPC_Triangle_Codes,
+    Reed_Solomon_GF_2_8,
+    RaptorQ
   };
 
-  /**
-   *  OTI values struct
-   */
+  struct Symbol {
+    char* data;
+    size_t length;
+    bool complete = false;
+    bool queued = false;
+  };
+
+  struct SourceBlock {
+    uint16_t id = 0;
+    bool complete = false;
+    std::map<uint16_t, Symbol> symbols; 
+  };
+
   struct FecOti {
     FecScheme encoding_id;
     uint64_t transfer_length;
     uint32_t encoding_symbol_length;
     uint32_t max_source_block_length;
+    std::string scheme_specific_info;
   };
+
 };

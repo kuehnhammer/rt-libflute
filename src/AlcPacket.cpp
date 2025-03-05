@@ -13,10 +13,13 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstring>
-#include <iostream>
-#include <arpa/inet.h>
 #include "AlcPacket.h"
+#include <netinet/in.h>      // for ntohl, htons, ntohs, htonl
+#include <cstdlib>          // for calloc, free
+#include <cstring>           // for memcpy
+#include <utility>           // for move
+#include "EncodingSymbol.h"  // for EncodingSymbol
+#include "spdlog/spdlog.h"   // for warn
 
 LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
 {
@@ -79,10 +82,16 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
         throw "TOI fields over 64 bits in length are not supported";
   } 
 
-  if (_lct_header.codepoint == 0) {
-    _fec_oti.encoding_id = FecScheme::CompactNoCode;
-  } else {
-    throw "Only Compact No-Code FEC is supported";
+  switch (_lct_header.codepoint) {
+    case 0:
+      _fec_oti.encoding_id = FecScheme::CompactNoCode;
+      break;
+    case 1:
+      _fec_oti.encoding_id = FecScheme::Raptor;
+      break;
+    default:
+      throw "Only the Compact No-Code and Raptor FEC schemes are supported";
+      break;
   }
 
   auto expected_header_len = 2 +
@@ -110,26 +119,36 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
                         break; // ignored
                       }
       case EXT_FTI: {
-                      if (_fec_oti.encoding_id == FecScheme::CompactNoCode) {
-                        if (hel != 4) {
-                          throw "Invalid length for EXT_FTI header extension";
-                        }
-                        _fec_oti.transfer_length = (uint64_t)(ntohs(*(uint16_t*)hdr_ptr)) << 32;
-                        hdr_ptr += 2;
-                        _fec_oti.transfer_length |= (uint64_t)(ntohl(*(uint32_t*)hdr_ptr));
-                        hdr_ptr += 4;
-                        hdr_ptr += 2; // reserved
-                        _fec_oti.encoding_symbol_length = ntohs(*(uint16_t*)hdr_ptr);
-                        hdr_ptr += 2;
-                        _fec_oti.max_source_block_length = ntohl(*(uint32_t*)hdr_ptr);
-                        hdr_ptr += 4;
+                      switch (_fec_oti.encoding_id) {
+                        case FecScheme::CompactNoCode:
+                          if (hel != 4) {
+                            throw "Invalid length for EXT_FTI header extension for Compact No Code FEC scheme";
+                          }
+                          _fec_oti.transfer_length = (uint64_t)(ntohs(*(uint16_t*)hdr_ptr)) << 32;
+                          hdr_ptr += 2;
+                          _fec_oti.transfer_length |= (uint64_t)(ntohl(*(uint32_t*)hdr_ptr));
+                          hdr_ptr += 4;
+                          hdr_ptr += 2; // reserved
+                          _fec_oti.encoding_symbol_length = ntohs(*(uint16_t*)hdr_ptr);
+                          hdr_ptr += 2;
+                          _fec_oti.max_source_block_length = ntohl(*(uint32_t*)hdr_ptr);
+                          hdr_ptr += 4;
+                          break;
+                        case FecScheme::Raptor:
+                          //TODO
+                          spdlog::warn("Raptor FEC support in EXT_FTI header extension is still in progress");
+                          throw "Raptor FEC support in EXT_FTI header extension is still in progress";
+                          break;
+                        default:
+                          throw "Unsupported FEC scheme";
+                          break;
                       }
                       break; 
                     }
       case EXT_FDT: {
                       uint8_t flute_version = (*hdr_ptr & 0xF0) >> 4;
-                      if (flute_version > 2) {
-                        throw "Unsupported FLUTE version";
+                      if (flute_version != 1) {
+                        throw "Only FLUTE version 1 is supported";
                       }
                       _fdt_instance_id =  (*hdr_ptr & 0x0F) << 16;
                       hdr_ptr++;
@@ -155,8 +174,8 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
   }
 }
 
-LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_oti, const std::vector<LibFlute::EncodingSymbol>& symbols, size_t max_size, uint32_t fdt_instance_id)
-  : _fec_oti(fec_oti)
+LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_oti, const std::vector<LibFlute::EncodingSymbol>& symbols, size_t max_size, uint32_t fdt_instance_id) // NOLINT
+  : _fec_oti(std::move(fec_oti))
 {
   auto lct_header_len = 3;
   if (toi == 0) { // Add extensions for FDT
@@ -164,21 +183,29 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
   }
 
   auto max_packet_length = max_size +
-    lct_header_len * 4
+    static_cast<long>(lct_header_len) * 4
     + 4 ;
 
   _buffer = (char*)calloc(max_packet_length, sizeof(char));
 
-  auto lct_header = (lct_header_t*)_buffer;
+  auto* lct_header = (lct_header_t*)_buffer;
 
   lct_header->version = 1;
   lct_header->half_word_flag = 1;
+  if (_fec_oti.encoding_id == LibFlute::FecScheme::CompactNoCode) {
+    lct_header->codepoint = 0;
+  } else if (_fec_oti.encoding_id == LibFlute::FecScheme::Raptor) {
+    lct_header->codepoint = 1;
+  } else {
+    throw "Unsupported FEC scheme";
+  }
   lct_header->lct_header_len = lct_header_len;
-  auto hdr_ptr = _buffer + 4;
-  auto payload_ptr = _buffer + 4 * lct_header_len;
+  lct_header->codepoint = (uint8_t)_fec_oti.encoding_id;
+  auto* hdr_ptr = _buffer + 4;
+  auto* payload_ptr = _buffer + 4UL * lct_header_len;
 
-  auto payload_size = EncodingSymbol::to_payload(symbols, payload_ptr, max_size, _fec_oti, ContentEncoding::NONE);
-  _len = 4 * lct_header_len + payload_size;
+  auto payload_size = EncodingSymbol::to_payload(symbols, payload_ptr, max_size, _fec_oti);
+  _len = 4L * lct_header_len + payload_size;
   
   hdr_ptr += 4; // CCI = 0
   
@@ -208,11 +235,12 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     *((uint16_t*)hdr_ptr) = htons(_fec_oti.encoding_symbol_length);
     hdr_ptr += 2;
     *((uint32_t*)hdr_ptr) = htonl(_fec_oti.max_source_block_length);
-    hdr_ptr += 4;
   }
 }
 
 LibFlute::AlcPacket::~AlcPacket()
 {
-  if (_buffer) free(_buffer);
+  if (_buffer != nullptr) {
+    free(_buffer);
+  }
 }

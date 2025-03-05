@@ -32,6 +32,7 @@ target_link_libraries( flute-transmitter
     config++
     flute
     pthread
+    m
 )
 target_link_libraries( flute-receiver
     LINK_PUBLIC
@@ -39,4 +40,13 @@ target_link_libraries( flute-receiver
     config++
     flute
     pthread
+    m
 )
+
+if (ENABLE_RAPTOR10)
+  add_definitions(-DENABLE_RAPTOR10)
+  include_directories(
+    SYSTEM
+    ${PROJECT_SOURCE_DIR}/lib/raptor10/src/libraptor
+    )
+endif (ENABLE_RAPTOR10)

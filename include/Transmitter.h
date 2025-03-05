@@ -14,15 +14,19 @@
 // under the License.
 //
 #pragma once
+
+#include <stddef.h>                       // for size_t
+#include <stdint.h>                       // for uint32_t, uint16_t, uint64_t
 #include <boost/asio.hpp>
-#include <boost/bind/bind.hpp>
-#include <queue>
-#include <string>
-#include <map>
-#include <mutex>
-#include "File.h"
-#include "AlcPacket.h"
-#include "FileDeliveryTable.h"
+#include <functional>                     // for function
+#include <map>                            // for map
+#include <memory>                         // for shared_ptr, unique_ptr
+#include <mutex>                          // for mutex
+#include <string>                         // for string
+#include "flute_types.h"                  // for FecScheme, FecScheme::Compa...
+namespace LibFlute { class File; }
+namespace LibFlute { class FileDeliveryTable; }
+namespace boost::system { class error_code; }
 
 namespace LibFlute {
   /**
@@ -51,6 +55,7 @@ namespace LibFlute {
       Transmitter( const std::string& address, 
           short port, uint64_t tsi, unsigned short mtu,
           uint32_t rate_limit,
+          FecScheme _fec_scheme,
           boost::asio::io_service& io_service);
 
      /**
@@ -76,6 +81,7 @@ namespace LibFlute {
       *  @param expires Expiry timestamp (based on NTP epoch)
       *  @param data Pointer to the data buffer (managed by caller)
       *  @param length Length of the data buffer (in bytes)
+      *  @param fec_scheme FEC scheme to use (default: Compact No-Code)
       *
       *  @return TOI of the file
       */
@@ -90,7 +96,7 @@ namespace LibFlute {
       *
       *  @return seconds since the NTP epoch
       */
-      uint64_t seconds_since_epoch();
+      static uint64_t seconds_since_epoch();
 
      /**
       *  Register a callback for file transmission completion notifications
@@ -106,9 +112,8 @@ namespace LibFlute {
 
       void file_transmitted(uint32_t toi);
 
-      void handle_send_to(const boost::system::error_code& error);
-      boost::asio::ip::udp::socket _socket;
       boost::asio::ip::udp::endpoint _endpoint;
+      boost::asio::ip::udp::socket _socket;
       boost::asio::io_service& _io_service;
       boost::asio::deadline_timer _send_timer;
       boost::asio::deadline_timer _fdt_timer;
@@ -124,6 +129,7 @@ namespace LibFlute {
       uint16_t _toi = 1;
 
       uint32_t _max_payload;
+      FecScheme _fec_scheme;
       FecOti _fec_oti;
 
       completion_callback_t _completion_cb = nullptr;

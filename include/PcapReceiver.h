@@ -1,6 +1,6 @@
 // libflute - FLUTE/ALC library
 //
-// Copyright (C) 2021 Klaus Kühnhammer (Österreichische Rundfunksender GmbH & Co KG)
+// Copyright (C) 2024 Klaus Kühnhammer (Bitstem GmbH)
 //
 // Licensed under the License terms and conditions for use, reproduction, and
 // distribution of 5G-MAG software (the “License”).  You may not use this file
@@ -26,6 +26,7 @@
 #include <vector>                     // for vector
 #include "FileDeliveryTable.h"        // for FileDeliveryTable
 #include "ReceiverBase.h" 
+#include <pcap.h>
 namespace LibFlute { class File; }
 namespace boost::system { class error_code; }
 
@@ -33,44 +34,40 @@ namespace LibFlute {
   /**
    *  FLUTE receiver class. Construct an instance of this to receive files from a FLUTE/ALC session.
    */
-  class Receiver : public ReceiverBase {
+  class PcapReceiver : public ReceiverBase {
     public:
      /**
       *  Default constructor.
       *
-      *  @param iface Address of the (local) interface to bind the receiving socket to. 0.0.0.0 = any.
+      *  @param pcap_file Path of the PCAP file to read
       *  @param address Multicast address
       *  @param port Target port 
       *  @param tsi TSI value of the session 
       *  @param io_service Boost io_service to run the socket operations in (must be provided by the caller)
       */
-      Receiver( const std::string& iface, const std::string& address, 
-          unsigned short port, uint64_t tsi, boost::asio::io_service& io_service);
+      PcapReceiver( const std::string& pcap_file, const std::string& address, 
+          unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, unsigned skip_ms = 0);
 
      /**
-      *  Default destructor.
+      *  Destructor.
       */
-      virtual ~Receiver() = default;
-
-     /**
-      *  Enable IPSEC ESP decryption of FLUTE payloads.
-      *
-      *  @param spi Security Parameter Index value to use
-      *  @param key AES key as a hex string (without leading 0x). Must be an even number of characters long.
-      */
-      void enable_ipsec( uint32_t spi, const std::string& aes_key);
+      virtual ~PcapReceiver();
 
       void stop() override { _running = false; }
 
     private:
-      void handle_receive_from(const boost::system::error_code& error,
-          size_t bytes_recvd);
-      boost::asio::ip::udp::socket _socket;
-      boost::asio::ip::udp::endpoint _sender_endpoint;
-
-      enum { max_length = 2048 };
-      std::array<char, max_length> _buffer;
+      static long tv_to_usecs(const struct timeval *tv);
+      void process_packet();
+      void read_packet();
+      void check_packet();
 
       bool _running = true;
+      pcap_t* _pcap_file;
+      long _last_packet_time = {};
+
+      const unsigned char* _packet_data = nullptr;
+      struct pcap_pkthdr _packet_header = {};
+
+      boost::asio::deadline_timer _packet_timer;
   };
 };

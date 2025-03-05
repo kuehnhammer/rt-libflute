@@ -13,25 +13,29 @@
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include <cstdio>
-#include <iostream>
-#include <argp.h>
 
-#include <cstdlib>
-
-#include <fstream>
-#include <string>
-#include <filesystem>
-#include <libconfig.h++>
+#include <argp.h>                          // for argp_state, argp_parse
+#include <fcntl.h>                         // for open, O_RDONLY
+#include <spdlog/common.h>                 // for level_enum
+#include <cstdint>                        // for uint32_t
+#include <sys/mman.h>                      // for mmap, munmap, MAP_PRIVATE
+#include <sys/stat.h>                      // for stat, fstat
+#include <syslog.h>                        // for LOG_CONS, LOG_PERROR, LOG_PID
+#include <unistd.h>                        // for close
 #include <boost/asio.hpp>
-
-#include "spdlog/async.h"
-#include "spdlog/spdlog.h"
-#include "spdlog/sinks/syslog_sink.h"
-
-#include "Version.h"
-#include "Transmitter.h"
-
+#include <cstdio>                          // for FILE, fprintf, size_t
+#include <cstdlib>                         // for strtoul
+#include <exception>                       // for exception
+#include <string>                          // for allocator, to_string, string
+#include <vector>                          // for vector
+#include "Transmitter.h"                   // for Transmitter
+#include "Version.h"                       // for VERSION_MAJOR, VERSION_MINOR
+#include "flute_types.h"                   // for FecScheme
+#include "spdlog/sinks/syslog_sink.h"      // for syslog_logger_mt
+#include "spdlog/spdlog.h"                 // for error, info, set_default_l...
+namespace libconfig { class Config; }
+namespace libconfig { class FileIOException; }
+namespace libconfig { class ParseException; }
 
 using libconfig::Config;
 using libconfig::FileIOException;
@@ -39,11 +43,12 @@ using libconfig::ParseException;
 
 static void print_version(FILE *stream, struct argp_state *state);
 void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
-const char *argp_program_bug_address = "Austrian Broadcasting Services <obeca@ors.at>";
+const char *argp_program_bug_address = "5G-MAG Reference Tools <reference-tools@5g-mag.com>";
 static char doc[] = "FLUTE/ALC transmitter demo";  // NOLINT
 
 static struct argp_option options[] = {  // NOLINT
     {"target", 'm', "IP", 0, "Target multicast address (default: 238.1.1.95)", 0},
+    {"fec", 'f', "FEC Scheme", 0, "Choose a scheme for Forward Error Correction. Compact No Code = 0, Raptor = 1 (default is 0)", 0},
     {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
     {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
     {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit (kbps), 0 = no limit, default: 1000 (1 Mbps)", 0},
@@ -65,6 +70,7 @@ struct ft_arguments {
   unsigned short mtu = 1500;
   uint32_t rate_limit = 1000;
   unsigned log_level = 2;        /**< log level */
+  unsigned fec = 0;        /**< log level */
   char **files;
 };
 
@@ -92,6 +98,13 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
       break;
     case 'l':
       arguments->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10));
+      break;
+    case 'f':
+      arguments->fec = static_cast<unsigned>(strtoul(arg, nullptr, 10));
+      if ( (arguments->fec | 1) != 1 ) {
+        spdlog::error("Invalid FEC scheme ! Please pick either 0 (Compact No Code) or 1 (Raptor)");
+        return ARGP_ERR_UNKNOWN;
+      }
       break;
     case ARGP_KEY_NO_ARGS:
       argp_usage (state);
@@ -131,7 +144,7 @@ auto main(int argc, char **argv) -> int {
   arguments.mcast_target = "238.1.1.95";
 
   argp_parse(&argp, argc, argv, 0, nullptr, &arguments);
-
+  
   // Set up logging
   std::string ident = "flute-transmitter";
   auto syslog_logger = spdlog::syslog_logger_mt("syslog", ident, LOG_PID | LOG_PERROR | LOG_CONS );
@@ -156,14 +169,29 @@ auto main(int argc, char **argv) -> int {
 
     // read the file contents into the buffers
     for (int j = 0; arguments.files[j]; j++) {
-      std::string location = arguments.files[j];
-      std::ifstream file(arguments.files[j], std::ios::binary | std::ios::ate);
-      std::streamsize size = file.tellg();
-      file.seekg(0, std::ios::beg);
-
-      char* buffer = (char*)malloc(size);
-      file.read(buffer, size);
-      files.push_back(FsFile{ arguments.files[j], buffer, (size_t)size});
+      struct stat sb;
+      int fd;
+      fd = open(arguments.files[j], O_RDONLY);
+      if (fd == -1) {
+        spdlog::error("Couldnt open file {}",arguments.files[j]);
+        continue;
+      } 
+      if (fstat(fd, &sb) == -1){ // To obtain file size
+        spdlog::error("fstat() call for file {} failed",arguments.files[j]);
+        close(fd);
+        continue;
+      }
+      if (sb.st_size <= 0) {
+        close(fd);
+        continue;
+      }
+      char* buffer = (char*) mmap(nullptr, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+      close(fd);
+      if ( (long) buffer <= 0) {
+        spdlog::error("mmap() failed for file {}",arguments.files[j]);
+        continue;
+      }
+      files.push_back(FsFile{ arguments.files[j], buffer, (size_t) sb.st_size});
     }
 
     // Create a Boost io_service
@@ -173,9 +201,10 @@ auto main(int argc, char **argv) -> int {
     LibFlute::Transmitter transmitter(
         arguments.mcast_target,
         (short)arguments.mcast_port,
-        0,
+        16,
         arguments.mtu,
         arguments.rate_limit,
+        LibFlute::FecScheme(arguments.fec),
         io);
 
     // Configure IPSEC ESP, if enabled
@@ -188,11 +217,10 @@ auto main(int argc, char **argv) -> int {
     transmitter.register_completion_callback(
         [&files](uint32_t toi) {
         for (auto& file : files) {
-        if (file.toi == toi) { 
-        spdlog::info("{} (TOI {}) has been transmitted",
-            file.location, file.toi);
-        // could free() the buffer here
-        }
+          if (file.toi == toi) { 
+            spdlog::info("{} (TOI {}) has been transmitted", file.location,file.toi);
+            munmap(file.buffer,file.len);
+          }
         }
         });
 
@@ -204,8 +232,10 @@ auto main(int argc, char **argv) -> int {
           file.buffer,
           file.len
           );
-      spdlog::info("Queued {} ({} bytes) for transmission, TOI is {}",
+      if (file.toi > 0) {
+        spdlog::info("Queued {} ({} bytes) for transmission, TOI is {}",
           file.location, file.len, file.toi);
+      }
     }
 
     // Start the io_service, and thus sending data
