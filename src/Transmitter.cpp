@@ -86,7 +86,9 @@ auto LibFlute::Transmitter::enable_ipsec(uint32_t spi, const std::string& key) -
 auto LibFlute::Transmitter::seconds_since_epoch() -> uint64_t 
 {
   return std::chrono::duration_cast<std::chrono::seconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
+      std::chrono::system_clock::now().time_since_epoch()).count() +
+      2'208'988'800; /* add the difference in seconds between the Unix epoch (1 January 1970, 00:00:00 UTC)
+                        and the NTP epoch (1 January 1900, 00:00:00 UTC) */
 }
 
 auto LibFlute::Transmitter::send_fdt() -> void {
@@ -111,6 +113,7 @@ auto LibFlute::Transmitter::send_fdt() -> void {
       true);
   if (file) {
     file->set_fdt_instance_id( _fdt->instance_id() );
+    spdlog::debug("Sending FDT instance {}:\n{}", _fdt->instance_id(), _fdt->to_string());
     _files.insert_or_assign(0, file);
   }
 }
@@ -217,7 +220,7 @@ auto LibFlute::Transmitter::send_next_packet() -> void
       _io_service.post(boost::bind(&Transmitter::send_next_packet, this)); //NOLINT
     } else {
       auto send_duration = ((bytes_queued * 8.0) / (double)_rate_limit/1000.0) * 1000.0 * 1000.0;
-      spdlog::debug("Rate limiter: queued {} bytes, limit {} kbps, next send in {} us", 
+      spdlog::trace("Rate limiter: queued {} bytes, limit {} kbps, next send in {} us", 
           bytes_queued, _rate_limit, send_duration);
       _send_timer.expires_from_now(boost::posix_time::microseconds(
             static_cast<int>(ceil(send_duration))));

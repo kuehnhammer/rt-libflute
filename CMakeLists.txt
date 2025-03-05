@@ -22,7 +22,7 @@ find_package(PCAP REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
 
-option(ENABLE_RAPTOR "Enable support for Raptor FEC" ON)
+option(ENABLE_RAPTOR "Enable support for Raptor FEC" OFF)
 
 add_subdirectory(examples)
 
