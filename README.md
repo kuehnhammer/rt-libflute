@@ -24,6 +24,12 @@ git submodule update --init
 ```
 
 ### Step 2: Building
+
+Install dependecies:
+```
+sudo apt install ninja-build build-essential libspdlog-dev pkgconf libssl-dev libpcap-dev libtinyxml2-dev libboost-dev clang-tidy libconfig++-dev zlib1g-dev
+```
+
 ````
 cd rt-libflute/
 mkdir build
