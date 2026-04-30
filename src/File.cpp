@@ -224,13 +224,15 @@ auto LibFlute::File::create_blocks() -> void
 
   auto* buffer_ptr = _buffer;
   size_t remaining_size = _meta.fec_oti.transfer_length;
-  auto number = 0;
+  uint32_t number = 0;
   while (remaining_size > 0) {
     LibFlute::SourceBlock block;
-    auto symbol_id = 0;
-    auto block_length = ( number < _nof_large_source_blocks ) ? _large_source_block_length : _small_source_block_length;
+    uint32_t symbol_id = 0;
+    uint32_t block_length = (number < _nof_large_source_blocks)
+                                ? _large_source_block_length
+                                : _small_source_block_length;
 
-    for (int i = 0; i < block_length; i++) {
+    for (uint32_t i = 0; i < block_length; i++) {
       auto symbol_length = std::min(remaining_size, (size_t)_meta.fec_oti.encoding_symbol_length);
       assert(buffer_ptr + symbol_length <= _buffer + _meta.fec_oti.transfer_length);
 

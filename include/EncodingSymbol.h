@@ -47,9 +47,9 @@ namespace LibFlute {
       EncodingSymbol(uint32_t id, uint32_t source_block_number, char* encoded_data, size_t data_len, FecScheme fec_scheme)
         : _id(id)
         , _source_block_number(source_block_number)
+        , _fec_scheme(fec_scheme)
         , _encoded_data(encoded_data)
-        , _data_len(data_len)
-        , _fec_scheme(fec_scheme) {}
+        , _data_len(data_len) {}
 
      /**
       *  Default destructor.

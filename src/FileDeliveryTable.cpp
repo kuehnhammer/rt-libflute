@@ -172,7 +172,8 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       (FecScheme)encoding_id,
         transfer_length,
         encoding_symbol_length,
-        max_source_block_length
+        max_source_block_length,
+        ""
     };
 
     FileEntry fe{
