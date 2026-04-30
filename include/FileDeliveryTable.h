@@ -61,7 +61,7 @@ namespace LibFlute {
       struct FileEntry {
         uint32_t toi;
         std::string content_location;
-        uint32_t content_length;
+        uint64_t content_length;
         std::string content_md5;
         std::string content_type;
         uint64_t expires;

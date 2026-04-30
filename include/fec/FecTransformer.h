@@ -50,7 +50,7 @@ namespace LibFlute {
      * @param bytes_read a pointer to an integer to store the number of bytes read out of buffer
      * @return a map of source blocks that the object has been encoded to
      */
-    virtual std::map<uint16_t, SourceBlock> create_blocks(char *buffer, int *bytes_read) = 0;
+    virtual std::map<uint32_t, SourceBlock> create_blocks(char *buffer, int *bytes_read) = 0;
 
     /**
      * @brief Process a received symbol
@@ -91,7 +91,7 @@ namespace LibFlute {
        *
        * @param blocks the source blocks of the file, stored in the File object
        */
-    virtual bool extract_file(std::map<uint16_t, SourceBlock> blocks) = 0;
+    virtual bool extract_file(std::map<uint32_t, SourceBlock> blocks) = 0;
 
     uint32_t nof_source_symbols = 0;
     uint32_t nof_source_blocks = 0;

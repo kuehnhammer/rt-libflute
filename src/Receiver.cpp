@@ -33,7 +33,9 @@
 
 LibFlute::Receiver::Receiver ( const std::string& iface, const std::string& address,
     unsigned short port, uint64_t tsi, boost::asio::io_service& io_service)
-  : ReceiverBase(address, port, tsi)
+  : ReceiverBase(tsi)
+  , _mcast_address(address)
+  , _mcast_port(port)
   , _socket(io_service)
 {
     boost::asio::ip::udp::endpoint listen_endpoint(

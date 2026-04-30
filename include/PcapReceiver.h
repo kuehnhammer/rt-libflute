@@ -61,6 +61,9 @@ namespace LibFlute {
       void read_packet();
       void check_packet();
 
+      std::string _mcast_address;
+      unsigned short _mcast_port;
+
       bool _running = true;
       pcap_t* _pcap_file;
       long _last_packet_time = {};

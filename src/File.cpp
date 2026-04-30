@@ -25,8 +25,8 @@
 #include <cmath>                 // for ceil, floor
 #include <cstdint>               // for uint16_t
 #include <cstring>               // for memcmp, memcpy
-#include <exception>             // for exception
 #include <memory>                // for shared_ptr, __shared_ptr_access, dyn...
+#include <stdexcept>             // for runtime_error
 #include <string>                // for string, basic_string
 #include <utility>               // for pair, move
 #include "EncodingSymbol.h"      // for EncodingSymbol
@@ -52,7 +52,7 @@ LibFlute::File::File(LibFlute::FileDeliveryTable::FileEntry entry)
   }
   if (_buffer == nullptr)
   {
-    throw "Failed to allocate file buffer";
+    throw std::runtime_error("Failed to allocate file buffer");
   }
   _own_buffer = true;
 
@@ -71,7 +71,7 @@ LibFlute::File::File(uint32_t toi,
 {
   if (data == nullptr) {
     spdlog::error("File pointer is null");
-    throw "Invalid file";
+    throw std::runtime_error("Invalid file");
   }
 
   spdlog::debug("Creating File from data");
@@ -81,7 +81,7 @@ LibFlute::File::File(uint32_t toi,
     _buffer = (char*)malloc(length);
     if (_buffer == nullptr)
     {
-      throw "Failed to allocate file buffer";
+      throw std::runtime_error("Failed to allocate file buffer");
     }
     memcpy(_buffer, data, length);
     _own_buffer = true;
@@ -91,7 +91,7 @@ LibFlute::File::File(uint32_t toi,
 
   std::array<unsigned char, EVP_MAX_MD_SIZE> md5;
   if ( calculate_md5(data, length, md5.data()) < 0 ){
-    throw "Failed to calculate md5";
+    throw std::runtime_error("Failed to calculate md5");
   }
 
   _meta.toi = toi;
@@ -117,8 +117,7 @@ LibFlute::File::File(uint32_t toi,
       break;
 #endif
     default:
-      throw "FEC scheme not supported or not yet implemented";
-      break;
+      throw std::runtime_error("FEC scheme not supported or not yet implemented");
   }
 
   calculate_partitioning();
@@ -141,20 +140,21 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
     spdlog::debug("Not handling symbol {} , SBN {} since file is already complete",symbol.id(),symbol.source_block_number());
     return;
   }
-  if (symbol.source_block_number() > _source_blocks.size()) {
-    throw "Source Block number too high";
-  } 
-
-  SourceBlock& source_block = _source_blocks[ symbol.source_block_number() ];
-  
-  if(source_block.complete){
-      spdlog::warn("Ignoring symbol {} since block {} is already complete",symbol.id(),symbol.source_block_number());
-	  return;
+  if (symbol.source_block_number() >= _source_blocks.size()) {
+    throw std::runtime_error("Source Block number too high");
   }
 
-  if (symbol.id() > source_block.symbols.size()) {
-    throw "Encoding Symbol ID too high";
-  } 
+  SourceBlock& source_block = _source_blocks[ symbol.source_block_number() ];
+
+  if (source_block.complete) {
+    spdlog::warn("Ignoring symbol {} since block {} is already complete",
+                 symbol.id(), symbol.source_block_number());
+    return;
+  }
+
+  if (symbol.id() >= source_block.symbols.size()) {
+    throw std::runtime_error("Encoding Symbol ID too high");
+  }
 
   LibFlute::Symbol& target_symbol = source_block.symbols[symbol.id()];
 
@@ -217,7 +217,7 @@ auto LibFlute::File::create_blocks() -> void
     _source_blocks = _meta.fec_transformer->create_blocks(_buffer, &bytes_read);
     if (_source_blocks.empty()) {
       spdlog::error("FEC Transformer failed to create source blocks");
-      throw "FEC Transformer failed to create source blocks";
+      throw std::runtime_error("FEC Transformer failed to create source blocks");
     }
     return;
   }

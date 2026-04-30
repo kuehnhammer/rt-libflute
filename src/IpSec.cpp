@@ -24,6 +24,7 @@
 #include <netlink/netlink.h>  // for nl_connect, nl_send_auto
 #include <netlink/socket.h>   // for nl_socket_alloc
 #include <cstdlib>           // for strtol
+#include <stdexcept>          // for runtime_error
 #include <sys/socket.h>       // for AF_INET
 #include <cstring>            // for memcpy, strcpy
 #include <string>             // for string, basic_string
@@ -105,7 +106,7 @@ namespace LibFlute::IpSec {
       binary_key.emplace_back((char)strtol(key.substr(i, 2).c_str(), nullptr, 16));
     }
     if (binary_key.size() > 512) {
-      throw "Key is too long";
+      throw std::runtime_error("Key is too long");
     }
     strcpy(algo.xa.alg_name, "aes");
     algo.xa.alg_key_len = binary_key.size() * 8;

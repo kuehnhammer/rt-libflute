@@ -9,7 +9,7 @@
 // agreed to in writing, software distributed under the License is distributed on
 // an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied.
-// 
+//
 // See the License for the specific language governing permissions and limitations
 // under the License.
 //
@@ -17,7 +17,6 @@
 
 #include <stddef.h>                   // for size_t
 #include <stdint.h>                   // for uint64_t, uint32_t
-#include <boost/asio.hpp>  // for io_service
 #include <functional>                 // for function
 #include <map>                        // for map
 #include <memory>                     // for shared_ptr, unique_ptr
@@ -26,11 +25,16 @@
 #include <vector>                     // for vector
 #include "FileDeliveryTable.h"        // for FileDeliveryTable
 namespace LibFlute { class File; }
-namespace boost::system { class error_code; }
 
 namespace LibFlute {
   /**
    *  Abstract FLUTE receiver base class. All receiver types inherit from this.
+   *
+   *  The base class is transport-agnostic: it knows nothing about sockets,
+   *  PCAP files, or the network stack. Subclasses obtain ALC packet bytes
+   *  from whatever source they like (UDP socket, PCAP capture, or RLC SDUs
+   *  out of the broadcast pipeline) and call ::handle_received_packet to
+   *  feed them in.
    */
   class ReceiverBase {
     public:
@@ -45,11 +49,9 @@ namespace LibFlute {
      /**
       *  Default constructor to be called from derived class.
       *
-      *  @param address Multicast address
-      *  @param port Target port 
-      *  @param tsi TSI value of the session 
+      *  @param tsi TSI value of the session
       */
-      ReceiverBase ( const std::string& address, unsigned short port, uint64_t tsi);
+      explicit ReceiverBase(uint64_t tsi);
 
      /**
       *  Default destructor.
@@ -74,11 +76,13 @@ namespace LibFlute {
       void remove_file_with_content_location(const std::string& cl);
 
      /**
-      *  Register a callback for file reception notifications
+      *  Register a callback for file reception notifications. Safe to call
+      *  concurrently with packet reception; the previous callback will not
+      *  be invoked again after this returns.
       *
       *  @param cb Function to call on file completion
       */
-      void register_completion_callback(completion_callback_t cb) { _completion_cb = cb; };
+      void register_completion_callback(completion_callback_t cb);
 
      /**
       *  Stop the receiver and clean up
@@ -91,8 +95,6 @@ namespace LibFlute {
       */
       void handle_received_packet(char* data, size_t bytes);
 
-      std::string _mcast_address = {};
-      unsigned short _mcast_port = {};
       uint64_t _tsi;
 
     private:
@@ -100,6 +102,7 @@ namespace LibFlute {
       std::map<uint64_t, std::shared_ptr<LibFlute::File>> _files;
       std::mutex _files_mutex;
 
+      // Guarded by _files_mutex.
       completion_callback_t _completion_cb = nullptr;
   };
 };

@@ -65,6 +65,9 @@ namespace LibFlute {
     private:
       void handle_receive_from(const boost::system::error_code& error,
           size_t bytes_recvd);
+
+      std::string _mcast_address;
+      unsigned short _mcast_port;
       boost::asio::ip::udp::socket _socket;
       boost::asio::ip::udp::endpoint _sender_endpoint;
 

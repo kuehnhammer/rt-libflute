@@ -67,9 +67,9 @@ namespace LibFlute {
   };
 
   struct SourceBlock {
-    uint16_t id = 0;
+    uint32_t id = 0;
     bool complete = false;
-    std::map<uint16_t, Symbol> symbols; 
+    std::map<uint32_t, Symbol> symbols;
   };
 
   struct FecOti {

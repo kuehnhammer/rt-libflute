@@ -15,7 +15,7 @@
 //
 #include "FileDeliveryTable.h"
 #include <cstdlib>         // for strtoul, strtoull
-#include <exception>        // for exception
+#include <stdexcept>        // for runtime_error
 #include <string>           // for string, to_string, stoull
 #include <utility>          // for move
 #include "spdlog/spdlog.h"  // for debug
@@ -40,13 +40,27 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_
   }
 }
 
-LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len) 
+LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len)
   : _instance_id( instance_id )
 {
   tinyxml2::XMLDocument doc(true, tinyxml2::COLLAPSE_WHITESPACE);
-  doc.Parse(buffer, len);
+  if (doc.Parse(buffer, len) != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error(std::string("Failed to parse FDT XML: ") +
+                             (doc.ErrorStr() != nullptr ? doc.ErrorStr() : "unknown"));
+  }
   auto* fdt_instance = doc.FirstChildElement("FDT-Instance");
-  _expires = std::stoull(fdt_instance->Attribute("Expires"));
+  if (fdt_instance == nullptr) {
+    throw std::runtime_error("FDT XML missing FDT-Instance root element");
+  }
+  const auto* expires_attr = fdt_instance->Attribute("Expires");
+  if (expires_attr == nullptr) {
+    throw std::runtime_error("FDT-Instance missing required Expires attribute");
+  }
+  try {
+    _expires = std::stoull(expires_attr);
+  } catch (const std::exception& ex) {
+    throw std::runtime_error(std::string("Invalid Expires attribute on FDT-Instance: ") + ex.what());
+  }
 
   spdlog::debug("Received new FDT with instance ID {}: {}", instance_id, buffer);
 
@@ -68,28 +82,28 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     def_fec_encoding_symbol_length = strtoul(val, nullptr, 0);
   }
 
-  for (auto* file = fdt_instance->FirstChildElement("File"); 
+  for (auto* file = fdt_instance->FirstChildElement("File");
       file != nullptr; file = file->NextSiblingElement("File")) {
 
     // required attributes
     const auto* toi_str = file->Attribute("TOI");
     if (toi_str == nullptr) {
-      throw "Missing TOI attribute on File element";
+      throw std::runtime_error("Missing TOI attribute on File element");
     }
     uint32_t toi = strtoull(toi_str, nullptr, 0);
 
     const auto* content_location = file->Attribute("Content-Location");
     if (content_location == nullptr) {
-      throw "Missing Content-Location attribute on File element";
+      throw std::runtime_error("Missing Content-Location attribute on File element");
     }
 
-    uint32_t content_length = 0;
+    uint64_t content_length = 0;
     val = file->Attribute("Content-Length");
     if (val != nullptr) {
       content_length = strtoull(val, nullptr, 0);
     }
 
-    uint32_t transfer_length = 0;
+    uint64_t transfer_length = 0;
     val = file->Attribute("Transfer-Length");
     if (val != nullptr) {
       transfer_length = strtoull(val, nullptr, 0);
@@ -140,14 +154,17 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     }
 
     if (fec_transformer && !fec_transformer->parse_fdt_info(file)) {
-      throw "Failed to parse fdt info for specific FEC data";
+      throw std::runtime_error("Failed to parse fdt info for specific FEC data");
     }
     uint32_t expires = 0;
     auto* cc = file->FirstChildElement("mbms2007:Cache-Control");
     if (cc != nullptr) {
       auto* expires_elem = cc->FirstChildElement("mbms2007:Expires");
       if (expires_elem != nullptr) {
-        expires = strtoul(expires_elem->GetText(), nullptr, 0);
+        const char* expires_text = expires_elem->GetText();
+        if (expires_text != nullptr) {
+          expires = strtoul(expires_text, nullptr, 0);
+        }
       }
     }
 
@@ -205,8 +222,8 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
     auto* f = doc.NewElement("File");
     f->SetAttribute("TOI", file.toi);
     f->SetAttribute("Content-Location", file.content_location.c_str());
-    f->SetAttribute("Content-Length", file.content_length);
-    f->SetAttribute("Transfer-Length", (unsigned)file.fec_oti.transfer_length);
+    f->SetAttribute("Content-Length", static_cast<uint64_t>(file.content_length));
+    f->SetAttribute("Transfer-Length", static_cast<uint64_t>(file.fec_oti.transfer_length));
     f->SetAttribute("Content-MD5", file.content_md5.c_str());
     f->SetAttribute("Content-Type", file.content_type.c_str());
     if(file.fec_transformer) {

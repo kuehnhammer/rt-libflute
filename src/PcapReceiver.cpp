@@ -35,7 +35,9 @@
 
 LibFlute::PcapReceiver::PcapReceiver ( const std::string& pcap_file, const std::string& address,
     unsigned short port, uint64_t tsi, boost::asio::io_service& io_service, unsigned skip_ms)
-  : ReceiverBase(address, port, tsi)
+  : ReceiverBase(tsi)
+  , _mcast_address(address)
+  , _mcast_port(port)
   , _packet_timer( io_service )
 {
   char errbuf[PCAP_ERRBUF_SIZE];

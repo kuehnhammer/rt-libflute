@@ -135,9 +135,9 @@ namespace LibFlute {
       void check_source_block_completion(SourceBlock& block);
       void check_file_completion();
 
-      std::map<uint16_t, LibFlute::SourceBlock> _source_blocks; 
+      std::map<uint32_t, LibFlute::SourceBlock> _source_blocks;
 
-      bool _complete = false;;
+      bool _complete = false;
 
       uint32_t _nof_source_symbols = 0;
       uint32_t _nof_source_blocks = 0;
