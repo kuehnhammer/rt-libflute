@@ -14,17 +14,50 @@ set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")
 set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -O3")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
-find_package(Boost REQUIRED)
+
+# When embedded in another project (e.g. 5gbc-rx) only the parser core
+# plus DirectReceiver is needed. The socket/pcap/ipsec/transmitter parts
+# pull in Boost.asio, libpcap, libnl-3, etc. — gated behind options so
+# embedders can opt out.
+option(LIBFLUTE_BUILD_SOCKET_RECEIVER "Build the UDP/multicast Receiver class (requires Boost.asio)" ON)
+option(LIBFLUTE_BUILD_PCAP_RECEIVER   "Build the PcapReceiver class (requires libpcap and Boost.asio)" ON)
+option(LIBFLUTE_BUILD_TRANSMITTER     "Build the Transmitter class (requires Boost.asio)" ON)
+option(LIBFLUTE_ENABLE_IPSEC          "Build IPSec ESP key plumbing (requires libnl-3.0)" ON)
+option(LIBFLUTE_BUILD_EXAMPLES        "Build the example executables (requires receiver and transmitter)" ON)
+option(ENABLE_RAPTOR                  "Enable support for Raptor FEC" OFF)
+
+# Anything Boost.asio-based needs Boost; collapse the three options
+# into a single \"do we need Boost?\" predicate for clarity.
+set(_libflute_needs_boost OFF)
+if(LIBFLUTE_BUILD_SOCKET_RECEIVER OR LIBFLUTE_BUILD_PCAP_RECEIVER OR LIBFLUTE_BUILD_TRANSMITTER)
+  set(_libflute_needs_boost ON)
+endif()
+
 find_package(spdlog REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(PCAP REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
-pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
 
-option(ENABLE_RAPTOR "Enable support for Raptor FEC" OFF)
+if(_libflute_needs_boost)
+  find_package(Boost REQUIRED)
+endif()
 
-add_subdirectory(examples)
+if(LIBFLUTE_BUILD_PCAP_RECEIVER)
+  find_package(PCAP REQUIRED)
+endif()
+
+if(LIBFLUTE_ENABLE_IPSEC)
+  pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
+endif()
+
+if(LIBFLUTE_BUILD_EXAMPLES)
+  if(NOT (LIBFLUTE_BUILD_SOCKET_RECEIVER AND LIBFLUTE_BUILD_TRANSMITTER))
+    message(STATUS "libflute: examples require both the socket Receiver and the Transmitter; disabling.")
+    set(LIBFLUTE_BUILD_EXAMPLES OFF)
+  else()
+    add_subdirectory(examples)
+  endif()
+endif()
 
 include_directories(
     "${PROJECT_BINARY_DIR}"
@@ -34,9 +67,13 @@ include_directories(
     SYSTEM
     ${PROJECT_SOURCE_DIR}/utils
     ${SPDLOG_INCLUDEDIR}
-    ${PCAP_INCLUDEDIR}
-    PkgConfig::NETLINK
     )
+if(LIBFLUTE_BUILD_PCAP_RECEIVER)
+  include_directories(SYSTEM ${PCAP_INCLUDEDIR})
+endif()
+if(LIBFLUTE_ENABLE_IPSEC)
+  include_directories(SYSTEM PkgConfig::NETLINK)
+endif()
 
 configure_file("include/Version.h.in" "Version.h")
 
@@ -47,12 +84,12 @@ if(ENABLE_RAPTOR)
   add_library(raptor STATIC)
   target_sources(raptor
     PRIVATE
-      ${PROJECT_SOURCE_DIR}/lib/raptor/bipartite.c 
-      ${PROJECT_SOURCE_DIR}/lib/raptor/decoder.c 
-      ${PROJECT_SOURCE_DIR}/lib/raptor/encoder.c 
-      ${PROJECT_SOURCE_DIR}/lib/raptor/galois.c 
-      ${PROJECT_SOURCE_DIR}/lib/raptor/gaussian.c 
-      ${PROJECT_SOURCE_DIR}/lib/raptor/pivoting.c 
+      ${PROJECT_SOURCE_DIR}/lib/raptor/bipartite.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/decoder.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/encoder.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/galois.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/gaussian.c
+      ${PROJECT_SOURCE_DIR}/lib/raptor/pivoting.c
       ${PROJECT_SOURCE_DIR}/lib/raptor/random.c
     PUBLIC
       ${PROJECT_SOURCE_DIR}/lib/raptor/raptor.h
@@ -62,16 +99,46 @@ else()
   message(STATUS "Skipping raptor library for Raptor FEC support. To enable support build with -DENABLE_RAPTOR=ON")
 endif()
 
+# Core: parser + ReceiverBase + File assembly + FDT + DirectReceiver.
+# These have no transport dependencies (just spdlog + OpenSSL/MD5 + tinyxml2).
 add_library(flute "")
 target_sources(flute
   PRIVATE
-    src/Transmitter.cpp src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/IpSec.cpp src/File.cpp 
-    src/ReceiverBase.cpp src/Receiver.cpp src/PcapReceiver.cpp
+    src/AlcPacket.cpp src/EncodingSymbol.cpp src/FileDeliveryTable.cpp src/File.cpp
+    src/ReceiverBase.cpp
     utils/base64.cpp
   PUBLIC
-    include/Receiver.h include/Transmitter.h include/File.h
-
+    include/File.h include/DirectReceiver.h include/ReceiverBase.h
   )
+
+if(LIBFLUTE_BUILD_TRANSMITTER)
+  target_sources(flute
+    PRIVATE src/Transmitter.cpp
+    PUBLIC  include/Transmitter.h
+  )
+endif()
+
+if(LIBFLUTE_BUILD_SOCKET_RECEIVER)
+  target_sources(flute
+    PRIVATE src/Receiver.cpp
+    PUBLIC  include/Receiver.h
+  )
+endif()
+
+if(LIBFLUTE_BUILD_PCAP_RECEIVER)
+  target_sources(flute
+    PRIVATE src/PcapReceiver.cpp
+    PUBLIC  include/PcapReceiver.h
+  )
+endif()
+
+if(LIBFLUTE_ENABLE_IPSEC)
+  target_sources(flute
+    PRIVATE src/IpSec.cpp
+    PUBLIC  include/IpSec.h
+  )
+endif()
+
 target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/include/)
 
 if(ENABLE_RAPTOR)
@@ -86,13 +153,25 @@ if(ENABLE_RAPTOR)
   target_link_libraries(flute LINK_PUBLIC raptor)
 endif()
 
-target_link_libraries( flute
+target_link_libraries(flute
     LINK_PUBLIC
     spdlog::spdlog
-    z
     pthread
     crypto
-    ${PCAP_LIBRARY}
     PkgConfig::TINYXML
-    PkgConfig::NETLINK
 )
+
+if(_libflute_needs_boost)
+  target_link_libraries(flute LINK_PUBLIC Boost::boost)
+endif()
+
+if(LIBFLUTE_BUILD_PCAP_RECEIVER)
+  target_link_libraries(flute LINK_PUBLIC ${PCAP_LIBRARY})
+endif()
+
+if(LIBFLUTE_ENABLE_IPSEC)
+  target_link_libraries(flute LINK_PUBLIC PkgConfig::NETLINK)
+endif()
+
+# zlib was previously linked unconditionally but is unused in the code
+# (every ContentEncoding != NONE branch throws). Drop it.
