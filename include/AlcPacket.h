@@ -103,9 +103,6 @@ namespace LibFlute {
 
       uint32_t _fdt_instance_id = 0;
 
-      uint32_t _source_block_number = 0;
-      uint32_t _encoding_symbol_id = 0;
-
       ContentEncoding _content_encoding = ContentEncoding::NONE;
       FecOti _fec_oti = {};
 
