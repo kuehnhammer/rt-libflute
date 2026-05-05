@@ -105,7 +105,21 @@ std::uint16_t Encoder::send(std::string content_location,
   _fdt->add(file->meta());
   _files.insert({toi, file});
   queue_fdt_locked();
+  _stats.files_queued.fetch_add(1, std::memory_order_relaxed);
   return toi;
+}
+
+EncoderStats Encoder::stats() const {
+  EncoderStats s;
+  s.packets_emitted        = _stats.packets_emitted.load(std::memory_order_relaxed);
+  s.packets_failed         = _stats.packets_failed.load(std::memory_order_relaxed);
+  s.bytes_emitted          = _stats.bytes_emitted.load(std::memory_order_relaxed);
+  s.source_symbols_emitted = _stats.source_symbols_emitted.load(std::memory_order_relaxed);
+  s.repair_symbols_emitted = _stats.repair_symbols_emitted.load(std::memory_order_relaxed);
+  s.files_queued           = _stats.files_queued.load(std::memory_order_relaxed);
+  s.files_transmitted      = _stats.files_transmitted.load(std::memory_order_relaxed);
+  s.fdt_packets_emitted    = _stats.fdt_packets_emitted.load(std::memory_order_relaxed);
+  return s;
 }
 
 void Encoder::queue_fdt_locked() {
@@ -204,6 +218,32 @@ bool Encoder::send_next_packet() {
     }
     sending_file->mark_completed(symbols, dispatched);
 
+    // Stats: count the packet, its bytes, the symbol breakdown, and
+    // (if it was a TOI=0 FDT) bump the FDT-emission counter. Symbol
+    // classification: for any file with a non-zero
+    // max_source_block_length, ESI < K is "source", ESI >= K is
+    // "repair". CompactNoCode never has repair (encoder targets
+    // K source symbols only); the breakdown reduces to all-source.
+    if (dispatched) {
+      _stats.packets_emitted.fetch_add(1, std::memory_order_relaxed);
+      _stats.bytes_emitted.fetch_add(packet->size(),
+                                       std::memory_order_relaxed);
+      const std::uint32_t k_block =
+          sending_file->meta().fec_oti.max_source_block_length;
+      std::uint64_t src = 0, rep = 0;
+      for (const auto& sym : symbols) {
+        if (k_block > 0 && sym.id() >= k_block) ++rep;
+        else ++src;
+      }
+      _stats.source_symbols_emitted.fetch_add(src, std::memory_order_relaxed);
+      _stats.repair_symbols_emitted.fetch_add(rep, std::memory_order_relaxed);
+      if (sending_file->meta().toi == 0) {
+        _stats.fdt_packets_emitted.fetch_add(1, std::memory_order_relaxed);
+      }
+    } else {
+      _stats.packets_failed.fetch_add(1, std::memory_order_relaxed);
+    }
+
     // Rate limiting: schedule the next allowed send. The callback's
     // wall-time cost is paid out of this budget — i.e. if dispatch
     // took 1 ms, the next deadline is 1 ms closer.
@@ -223,6 +263,7 @@ bool Encoder::send_next_packet() {
       if (completed_toi != 0) {
         dispatch_cb   = _completion_cb;
         completed_file = _files[completed_toi];
+        _stats.files_transmitted.fetch_add(1, std::memory_order_relaxed);
       }
       file_transmitted_locked(completed_toi);
     }

@@ -9,6 +9,7 @@
 //
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -30,6 +31,54 @@ class File;
 /// FDT-Instance Expires checks. Tests inject their own clock via
 /// Decoder::set_now_provider().
 std::uint64_t ntp_seconds_now();
+
+// Decoder operational counters. Snapshot returned by
+// Decoder::stats(). Lifetime-cumulative; values monotonically
+// non-decreasing. The library exposes the full counter set; consumers
+// pick what they want to surface to operators.
+struct DecoderStats {
+  // Packets observed at feed_packet().
+  std::uint64_t packets_received = 0;
+  std::uint64_t bytes_received   = 0;
+
+  // Per-packet drop reasons. packets_dropped_total() sums them.
+  // (Expired-FDT rejection is NOT a packet drop — by the time the
+  // expiry check fires the bytes have already been accumulated; see
+  // fdts_rejected_expired below for that counter.)
+  std::uint64_t dropped_wrong_tsi      = 0;
+  std::uint64_t dropped_malformed      = 0;  // parser threw
+  std::uint64_t dropped_truncated      = 0;  // header_length > packet bytes
+  std::uint64_t dropped_stale_fdt      = 0;  // TOI=0 packet for older FDT
+  std::uint64_t dropped_no_matching_file = 0;  // TOI != 0, no FDT entry yet
+                                                // OR file already complete
+
+  std::uint64_t packets_dropped_total() const {
+    return dropped_wrong_tsi + dropped_malformed + dropped_truncated +
+           dropped_stale_fdt + dropped_no_matching_file;
+  }
+
+  // Encoding-symbol breakdown. For CompactNoCode every symbol is a
+  // source symbol. For Raptor, ESI < K (file's max_source_block_length)
+  // is "source", ESI >= K is "repair".
+  std::uint64_t source_symbols_received = 0;
+  std::uint64_t repair_symbols_received = 0;
+
+  // File-level counters.
+  std::uint64_t files_completed       = 0;
+  // Incomplete files evicted via remove_expired_files() or
+  // remove_file_with_content_location() — i.e. reception was started
+  // (the FDT announced this TOI) but the receiver never accumulated
+  // enough symbols to finish, even with FEC repair if applicable.
+  std::uint64_t files_discarded_incomplete = 0;
+  // Sum of declared transfer_length over all files counted in
+  // files_discarded_incomplete. Useful for "what % of announced
+  // payload couldn't be recovered" dashboards.
+  std::uint64_t bytes_discarded_incomplete = 0;
+
+  std::uint64_t fdts_accepted          = 0;
+  std::uint64_t fdts_rejected_expired  = 0;
+  std::uint64_t fdts_rejected_stale    = 0;
+};
 
 // FLUTE/ALC receive-side decoder.
 //
@@ -89,6 +138,10 @@ class Decoder {
   /// deterministically exercise the expired-FDT branch.
   void set_now_provider(NowProvider fn);
 
+  /// Snapshot of the decoder's operational counters. Lock-free; the
+  /// returned value is decoupled from internal state.
+  DecoderStats stats() const;
+
  private:
   std::mutex          _files_mutex;
   std::uint64_t       _tsi;
@@ -96,6 +149,25 @@ class Decoder {
   std::unique_ptr<FileDeliveryTable> _fdt;
   std::map<std::uint64_t, std::shared_ptr<File>> _files;
   CompletionCallback _completion_cb;
+
+  // Lock-free counters. See DecoderStats for semantics.
+  struct AtomicStats {
+    std::atomic<std::uint64_t> packets_received{0};
+    std::atomic<std::uint64_t> bytes_received{0};
+    std::atomic<std::uint64_t> dropped_wrong_tsi{0};
+    std::atomic<std::uint64_t> dropped_malformed{0};
+    std::atomic<std::uint64_t> dropped_truncated{0};
+    std::atomic<std::uint64_t> dropped_stale_fdt{0};
+    std::atomic<std::uint64_t> dropped_no_matching_file{0};
+    std::atomic<std::uint64_t> source_symbols_received{0};
+    std::atomic<std::uint64_t> repair_symbols_received{0};
+    std::atomic<std::uint64_t> files_completed{0};
+    std::atomic<std::uint64_t> files_discarded_incomplete{0};
+    std::atomic<std::uint64_t> bytes_discarded_incomplete{0};
+    std::atomic<std::uint64_t> fdts_accepted{0};
+    std::atomic<std::uint64_t> fdts_rejected_expired{0};
+    std::atomic<std::uint64_t> fdts_rejected_stale{0};
+  } _stats;
 };
 
 }  // namespace LibFlute

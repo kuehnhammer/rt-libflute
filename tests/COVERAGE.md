@@ -140,6 +140,43 @@ DirectReceiver→Decoder API rename.)
 | `Decoder.FilePacketRoutedToFileByToi` | RFC 6726 App. A step 4 | active |
 | `Decoder.CompletionCallbackFiresWhenFileFullyReceived` | RFC 6726 App. A step 7 | active |
 
+### `tests/unit/stats_test.cpp` — Encoder/Decoder operational counters
+
+Counters are advertised via `LibFlute::EncoderStats` and
+`LibFlute::DecoderStats`; consumers pick which to surface to
+operators.
+
+| Test | What it pins | State |
+|------|--------------|-------|
+| `EncoderStats.FreshEncoderHasAllZeroCounters` | All counters start at 0 | active (round-6) |
+| `DecoderStats.FreshDecoderHasAllZeroCounters` | All counters start at 0 | active (round-6) |
+| `StatsIntegration.OneFileRoundTripCountersMatch` | Encoder.bytes_emitted == Decoder.bytes_received; one file flows end-to-end | active (round-6) |
+| `DecoderStats.WrongTsiPacketIncrementsDroppedCounter` | dropped_wrong_tsi semantics | active (round-6) |
+| `DecoderStats.MalformedPacketIncrementsDroppedCounter` | dropped_malformed semantics | active (round-6) |
+| `DecoderStats.StaleFdtPacketIncrementsDroppedCounter` | dropped_stale_fdt semantics | active (round-6) |
+| `DecoderStats.EvictedIncompleteFileCountsAsDiscarded` | files/bytes_discarded_incomplete bumped on eviction | active (round-6) |
+| `DecoderStats.RaptorLossyRoundTripDistinguishesSourceVsRepair` | source_symbols_received vs repair_symbols_received split correctly under loss | active (round-6, gated on RAPTOR_ENABLED) |
+
+### `tests/bench/flute_bench.cpp` — end-to-end perf benchmark
+
+Not a gtest target; built only with `-DLIBFLUTE_BUILD_BENCH=ON`.
+Round-trips 10 / 100 / 500 MB buffers through Encoder→Decoder
+in-process and prints throughput, packet counts, and FEC overhead.
+Round-6 baseline numbers (Release, bitstem-r10 fast decoder, mtu=1500):
+
+| F | FEC | Throughput | FEC overhead |
+|---|---|---|---|
+| 10 MB  | None   | ~305 MB/s | 0 |
+| 10 MB  | Raptor | ~2.4 MB/s | 15.0 % |
+| 100 MB | None   | ~105 MB/s | 0 |
+| 100 MB | Raptor | ~2.1 MB/s | 13.5 % |
+| 500 MB | None   | ~10.7 MB/s | 0 |
+| 500 MB | Raptor | ~2.1 MB/s | 14.9 % |
+
+The Raptor numbers are dramatically below the bare bitstem-r10
+codec's measured throughput; the FLUTE-layer glue is the bottleneck.
+Investigation is round-7+ work.
+
 ### `tests/unit/integration_test.cpp` — TX→RX round-trip
 
 End-to-end. Encoder emits ALC packet bytes via its PacketCallback;
@@ -199,6 +236,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | `f2c9a81` |
 | 5 | RaptorFEC encoder passed a non-`K*T`-sized source span to bitstem-r10's Encoder::Create when F was not a multiple of T; the codec rejected it | RFC 5053 §4.2 (zero-pad last source symbol to T) | `27b6866` |
 | 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | `27b6866` |
+| 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | (round-6 commit) |
 
 ## Out of scope (future rounds)
 
@@ -218,7 +256,8 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | Proper RFC 5053 §4.4.1.2 source-block partitioning (K_L / K_S split, Z_L / Z_S blocks) | RFC 5053 §4.4.1.2 | Current code uses fixed-K-with-remainder-in-last-block. Correctness-equivalent for round-trip but not §4.4.1.2-compliant; affects how K is distributed across blocks for large files. |
 | `Encoder::send` 16-bit TSI/TOI cap | RFC 5651 §5.1 (TSI/TOI may be up to 48 bits) | Encoder/AlcPacket producer hardcodes `half_word_flag=1, toi_flag=0`; supporting wider IDs needs producer changes. |
 | Raptor decoder's repair tolerance | RFC 5053 / lib/raptor | Round-5 lossy tests deliberately stay within FEC budget; characterising the codec's actual loss limit and adding a "loss right at the edge" stress test would tighten coverage. |
-| Decoder/Encoder reception statistics | (operational, not RFC-required) | Surface counters for systematic-vs-repair packet RX, total bytes, files completed/dropped, FEC-recovery success/failure, etc. Useful for 5gr / core embedders to expose to operators. Add a `stats()` accessor on Decoder + matching tests. |
+| Decoder/Encoder reception statistics | (operational, not RFC-required) | DONE in round 6 — see EncoderStats / DecoderStats and tests/unit/stats_test.cpp. |
+| Raptor FLUTE-glue throughput investigation | bench/flute_bench output | Round-6 benchmark surfaces ~2 MB/s Raptor throughput vs bare bitstem-r10's much higher numbers. Profile the glue layer (likely candidates: per-symbol std::map, per-symbol heap allocation in EncodingSymbol, the pad-and-rebuild path in RaptorFEC::create_block, std::map<u16, DecoderCtx> lookup hot path). |
 
 ## Test-writing rules
 

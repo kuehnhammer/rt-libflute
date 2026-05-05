@@ -24,6 +24,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 # sockets to demonstrate end-to-end use.
 option(LIBFLUTE_BUILD_EXAMPLES "Build the example executables (POSIX-socket transmitter / receiver)" ON)
 option(LIBFLUTE_BUILD_TESTING  "Build libflute unit tests (fetches GoogleTest via FetchContent)" ON)
+option(LIBFLUTE_BUILD_BENCH    "Build end-to-end round-trip benchmark (transient ~1GB allocations)" OFF)
 option(ENABLE_RAPTOR           "Enable support for Raptor FEC" OFF)
 
 find_package(spdlog REQUIRED)
@@ -119,4 +120,8 @@ if(LIBFLUTE_BUILD_TESTING)
 
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(LIBFLUTE_BUILD_BENCH)
+  add_subdirectory(tests/bench)
 endif()

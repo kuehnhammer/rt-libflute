@@ -9,6 +9,7 @@
 //
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,37 @@
 namespace LibFlute {
 
 class File;
+
+// Encoder operational counters. Snapshot returned by Encoder::stats();
+// values monotonically non-decreasing over the lifetime of the
+// Encoder. The library exposes the full counter set; consumers pick
+// the subset they want to surface to operators.
+struct EncoderStats {
+  // Packets dispatched to the consumer's PacketCallback. _emitted
+  // counts cb-returned-true; _failed counts cb-returned-false.
+  std::uint64_t packets_emitted = 0;
+  std::uint64_t packets_failed  = 0;
+  std::uint64_t bytes_emitted   = 0;
+
+  // Encoding-symbol breakdown across all emitted packets. For
+  // CompactNoCode (no FEC repair) every symbol is a source symbol.
+  // For Raptor, ESI < K is source, ESI >= K is repair (computed
+  // against the file's FDT-declared max_source_block_length, which
+  // matches K for non-trailing blocks; the trailing block of a
+  // multi-block Raptor file may classify ~one symbol off).
+  std::uint64_t source_symbols_emitted = 0;
+  std::uint64_t repair_symbols_emitted = 0;
+
+  // File-level counters. _queued grows as the consumer calls send();
+  // _transmitted grows when each non-FDT file's last packet leaves.
+  std::uint64_t files_queued      = 0;
+  std::uint64_t files_transmitted = 0;
+
+  // FDT (TOI=0) packet emissions. The encoder regenerates and
+  // re-emits the FDT each time a file is queued or completes; this
+  // counter rolls up the resulting packet count.
+  std::uint64_t fdt_packets_emitted = 0;
+};
 
 // FLUTE/ALC transmit-side encoder.
 //
@@ -122,6 +154,10 @@ class Encoder {
   /// or a fresh one is constructed.
   void stop();
 
+  /// Snapshot of the encoder's operational counters. Lock-free; the
+  /// returned value is decoupled from internal state.
+  EncoderStats stats() const;
+
   /// NTP-epoch second count (RFC 5905). Useful for filling in
   /// FDT/Cache-Control Expires fields.
   static std::uint64_t seconds_since_epoch();
@@ -146,6 +182,22 @@ class Encoder {
 
   Clock::time_point _next_send_due = Clock::time_point::min();
   bool              _running       = true;
+
+  // Lock-free counters. Read by stats() outside the encoder mutex.
+  // Increments are coupled with the operations they describe and
+  // therefore inherit the encoder's mutex ordering, but reads do not
+  // need to take the lock — relaxed loads are sufficient because the
+  // counters are advisory.
+  struct AtomicStats {
+    std::atomic<std::uint64_t> packets_emitted{0};
+    std::atomic<std::uint64_t> packets_failed{0};
+    std::atomic<std::uint64_t> bytes_emitted{0};
+    std::atomic<std::uint64_t> source_symbols_emitted{0};
+    std::atomic<std::uint64_t> repair_symbols_emitted{0};
+    std::atomic<std::uint64_t> files_queued{0};
+    std::atomic<std::uint64_t> files_transmitted{0};
+    std::atomic<std::uint64_t> fdt_packets_emitted{0};
+  } _stats;
 };
 
 }  // namespace LibFlute

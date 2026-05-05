@@ -51,6 +51,9 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
       reinterpret_cast<const char*>(alc_payload.data()));
   const std::size_t bytes = alc_payload.size();
 
+  _stats.packets_received.fetch_add(1, std::memory_order_relaxed);
+  _stats.bytes_received.fetch_add(bytes, std::memory_order_relaxed);
+
   // File completions are dispatched outside the mutex; collect them
   // here and invoke the callback after the lock is released so a
   // callback that re-enters the Decoder cannot deadlock.
@@ -62,12 +65,14 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
 
     if (alc.tsi() != _tsi) {
       spdlog::warn("Discarding packet for unknown TSI {}", alc.tsi());
+      _stats.dropped_wrong_tsi.fetch_add(1, std::memory_order_relaxed);
       return;
     }
 
     if (bytes < alc.header_length()) {
       spdlog::warn("Discarding packet: header_length {} exceeds packet size {}",
                    alc.header_length(), bytes);
+      _stats.dropped_truncated.fetch_add(1, std::memory_order_relaxed);
       return;
     }
 
@@ -103,6 +108,7 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
         if (stale_vs_committed || stale_vs_inflight) {
           spdlog::debug("Discarding stale FDT packet (instance_id {})",
                         new_id);
+          _stats.dropped_stale_fdt.fetch_add(1, std::memory_order_relaxed);
           return;
         }
 
@@ -122,19 +128,33 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
         }
       }
 
-      if (_files.find(alc.toi()) != _files.end() &&
-          !_files[alc.toi()]->complete()) {
+      const auto file_it = _files.find(alc.toi());
+      const bool file_present = file_it != _files.end();
+      const bool file_already_complete =
+          file_present && file_it->second->complete();
+      if (file_present && !file_already_complete) {
         auto encoding_symbols = EncodingSymbol::from_payload(
             data + alc.header_length(),
             bytes - alc.header_length(),
             _files[alc.toi()]->fec_oti(),
             alc.content_encoding());
 
+        // Symbol-class breakdown. ESI < K (file's
+        // max_source_block_length) is "source", ESI >= K is "repair".
+        // CompactNoCode never sends repair so the receiver naturally
+        // counts every symbol as source.
+        const std::uint32_t k_block =
+            _files[alc.toi()]->fec_oti().max_source_block_length;
+        std::uint64_t src = 0, rep = 0;
         for (const auto& symbol : encoding_symbols) {
           spdlog::debug("received TOI {} SBN {} ID {}",
                         alc.toi(), symbol.source_block_number(), symbol.id());
+          if (k_block > 0 && symbol.id() >= k_block) ++rep;
+          else ++src;
           _files[alc.toi()]->put_symbol(symbol);
         }
+        _stats.source_symbols_received.fetch_add(src, std::memory_order_relaxed);
+        _stats.repair_symbols_received.fetch_add(rep, std::memory_order_relaxed);
 
         File* file = _files[alc.toi()].get();
         if (_files[alc.toi()]->complete()) {
@@ -150,11 +170,14 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
           }
 
           spdlog::debug("File with TOI {} completed", alc.toi());
-          if (alc.toi() != 0 && _completion_cb) {
-            // Snapshot under the lock; dispatch after release.
-            completed_file    = _files[alc.toi()];
-            callback_snapshot = _completion_cb;
-            _files.erase(alc.toi());
+          if (alc.toi() != 0) {
+            _stats.files_completed.fetch_add(1, std::memory_order_relaxed);
+            if (_completion_cb) {
+              // Snapshot under the lock; dispatch after release.
+              completed_file    = _files[alc.toi()];
+              callback_snapshot = _completion_cb;
+              _files.erase(alc.toi());
+            }
           }
 
           if (alc.toi() == 0) {  // parse complete FDT
@@ -169,8 +192,11 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
             if (candidate->is_expired(_now())) {
               spdlog::debug("Discarding expired FDT-Instance ID {}",
                             alc.fdt_instance_id());
+              _stats.fdts_rejected_expired.fetch_add(1,
+                                                       std::memory_order_relaxed);
             } else {
               _fdt = std::move(candidate);
+              _stats.fdts_accepted.fetch_add(1, std::memory_order_relaxed);
               for (const auto& file_entry : _fdt->file_entries()) {
                 if (_files.find(file_entry.toi) == _files.end()) {
                   spdlog::debug("Starting reception for TOI {}: {} ({})",
@@ -183,13 +209,24 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
             }
           }
         }
-      } else {
-        spdlog::trace("Discarding packet for unknown or already completed file with TOI {}",
+      } else if (file_already_complete) {
+        // Bonus symbol(s) arriving after the file (typically a
+        // Raptor source block) was already successfully decoded.
+        // Not a drop — just unused redundancy. Silent skip; not
+        // worth a counter because it's a normal Raptor scenario.
+        spdlog::trace("Ignoring symbol for already-complete TOI {}",
                       alc.toi());
+      } else {
+        // No File for this TOI — receiver hasn't seen the FDT yet,
+        // or the TOI is for a different session entirely.
+        spdlog::trace("Discarding packet for unknown TOI {}", alc.toi());
+        _stats.dropped_no_matching_file.fetch_add(1,
+                                                    std::memory_order_relaxed);
       }
     }
   } catch (const std::exception& ex) {
     spdlog::warn("Failed to decode ALC/FLUTE packet: {}", ex.what());
+    _stats.dropped_malformed.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
@@ -214,6 +251,17 @@ void Decoder::remove_expired_files(unsigned max_age_seconds) {
     auto age = std::time(nullptr) - it->second->received_at();
     if (it->second->meta().content_location != "bootstrap.multipart" &&
         age > max_age_seconds) {
+      // Incomplete-at-eviction = the FEC layer (or the lossless
+      // accumulator for CompactNoCode) couldn't recover the file
+      // before its TTL expired. This is the closest signal we have
+      // to "FEC repair gave up".
+      if (it->first != 0 && !it->second->complete()) {
+        _stats.files_discarded_incomplete.fetch_add(
+            1, std::memory_order_relaxed);
+        _stats.bytes_discarded_incomplete.fetch_add(
+            it->second->meta().fec_oti.transfer_length,
+            std::memory_order_relaxed);
+      }
       it = _files.erase(it);
     } else {
       ++it;
@@ -226,11 +274,38 @@ void Decoder::remove_file_with_content_location(
   const std::lock_guard<std::mutex> lock(_files_mutex);
   for (auto it = _files.cbegin(); it != _files.cend();) {
     if (it->second->meta().content_location == content_location) {
+      if (it->first != 0 && !it->second->complete()) {
+        _stats.files_discarded_incomplete.fetch_add(
+            1, std::memory_order_relaxed);
+        _stats.bytes_discarded_incomplete.fetch_add(
+            it->second->meta().fec_oti.transfer_length,
+            std::memory_order_relaxed);
+      }
       it = _files.erase(it);
     } else {
       ++it;
     }
   }
+}
+
+DecoderStats Decoder::stats() const {
+  DecoderStats s;
+  s.packets_received          = _stats.packets_received.load(std::memory_order_relaxed);
+  s.bytes_received            = _stats.bytes_received.load(std::memory_order_relaxed);
+  s.dropped_wrong_tsi         = _stats.dropped_wrong_tsi.load(std::memory_order_relaxed);
+  s.dropped_malformed         = _stats.dropped_malformed.load(std::memory_order_relaxed);
+  s.dropped_truncated         = _stats.dropped_truncated.load(std::memory_order_relaxed);
+  s.dropped_stale_fdt         = _stats.dropped_stale_fdt.load(std::memory_order_relaxed);
+  s.dropped_no_matching_file  = _stats.dropped_no_matching_file.load(std::memory_order_relaxed);
+  s.source_symbols_received   = _stats.source_symbols_received.load(std::memory_order_relaxed);
+  s.repair_symbols_received   = _stats.repair_symbols_received.load(std::memory_order_relaxed);
+  s.files_completed           = _stats.files_completed.load(std::memory_order_relaxed);
+  s.files_discarded_incomplete = _stats.files_discarded_incomplete.load(std::memory_order_relaxed);
+  s.bytes_discarded_incomplete = _stats.bytes_discarded_incomplete.load(std::memory_order_relaxed);
+  s.fdts_accepted             = _stats.fdts_accepted.load(std::memory_order_relaxed);
+  s.fdts_rejected_expired     = _stats.fdts_rejected_expired.load(std::memory_order_relaxed);
+  s.fdts_rejected_stale       = _stats.fdts_rejected_stale.load(std::memory_order_relaxed);
+  return s;
 }
 
 }  // namespace LibFlute

@@ -108,13 +108,19 @@ LibFlute::File::File(uint32_t toi,
       _meta.fec_oti.transfer_length = length;
       break;
 #ifdef RAPTOR_ENABLED
-    case FecScheme::Raptor:
-      _meta.fec_transformer = std::make_shared<RaptorFEC>(length, fec_oti.encoding_symbol_length); 
-      _meta.fec_oti.transfer_length = length;
-      _meta.fec_oti.encoding_symbol_length = std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->T;
-      _meta.fec_oti.max_source_block_length = std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->K * 
-        std::dynamic_pointer_cast<RaptorFEC>(_meta.fec_transformer)->T;
+    case FecScheme::Raptor: {
+      auto raptor = std::make_shared<RaptorFEC>(length, fec_oti.encoding_symbol_length);
+      _meta.fec_transformer = raptor;
+      _meta.fec_oti.transfer_length        = length;
+      _meta.fec_oti.encoding_symbol_length = raptor->T;
+      // RFC 5052 §3.4.2: max_source_block_length is in SYMBOLS, not
+      // bytes. Earlier code multiplied by T; that broke source/repair
+      // classification (symbols with ESI in [0, K) are source, ESI ≥ K
+      // is repair) on both sides since both sender and receiver were
+      // looking at K*T instead of K.
+      _meta.fec_oti.max_source_block_length = raptor->K;
       break;
+    }
 #endif
     default:
       throw std::runtime_error("FEC scheme not supported or not yet implemented");
@@ -147,8 +153,12 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
   SourceBlock& source_block = _source_blocks[ symbol.source_block_number() ];
 
   if (source_block.complete) {
-    spdlog::warn("Ignoring symbol {} since block {} is already complete",
-                 symbol.id(), symbol.source_block_number());
+    // Bonus / repair symbols arriving after the source block was
+    // already decoded — normal Raptor case, just unused redundancy.
+    // Trace-level only (the encoder routinely emits more symbols
+    // than needed for repair tolerance).
+    spdlog::trace("Ignoring symbol {} since block {} is already complete",
+                  symbol.id(), symbol.source_block_number());
     return;
   }
 
