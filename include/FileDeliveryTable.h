@@ -121,6 +121,25 @@ namespace LibFlute {
       */
       std::vector<FileEntry> file_entries() { return _file_entries; };
 
+     /**
+      *  RFC 6726 §3.3 + RFC 1982 serial-number arithmetic over the
+      *  20-bit FDT-Instance-ID space (the EXT_FDT field is 20 bits).
+      *  Returns true iff `candidate` is "newer than" `current` —
+      *  i.e. it lies in the forward half of the 2^20 circle from
+      *  `current`. Equality is not "newer". The midpoint case
+      *  (candidate = current + 2^19) is undefined per RFC 1982; we
+      *  resolve it as "not newer" so the receiver keeps the current
+      *  FDT and only switches on a clear forward step.
+      */
+      static bool IsNewerInstanceId(uint32_t candidate, uint32_t current);
+
+     /**
+      *  RFC 6726 §3.3: an FDT-Instance MUST NOT be relied upon after
+      *  its `Expires` time. `now` is the current NTP-epoch second
+      *  count; returns true iff this FDT has passed its expiry.
+      */
+      bool is_expired(uint64_t now) const { return now > _expires; }
+
       // TS 26.346 cl. 7.2.10.2 FDT-Instance-level MBMS extension fields.
       // nullopt means "not present in the FDT XML".
       std::optional<bool> full_fdt() const { return _full_fdt; }            // mbms2008 (Rel-8)

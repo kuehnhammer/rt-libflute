@@ -113,6 +113,21 @@ const char* FindAttrByNs(const tinyxml2::XMLElement* e, const NsMap& ns,
 
 }  // namespace
 
+// RFC 6726 §3.3 instance-ID space is 20 bits (the EXT_FDT field
+// reserves 20 bits). RFC 1982 serial-number arithmetic over a 2^20
+// circle: half the space (2^19) is "ahead", the other half is
+// "behind". We compute the forward distance modulo 2^20 and call
+// the candidate "newer" iff the forward distance is in (0, 2^19).
+bool LibFlute::FileDeliveryTable::IsNewerInstanceId(uint32_t candidate,
+                                                     uint32_t current) {
+  constexpr uint32_t kModulus  = 1u << 20;
+  constexpr uint32_t kHalf     = 1u << 19;
+  const uint32_t cand = candidate & (kModulus - 1u);
+  const uint32_t cur  = current   & (kModulus - 1u);
+  const uint32_t fwd  = (cand - cur) & (kModulus - 1u);
+  return fwd != 0u && fwd < kHalf;
+}
+
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_oti)
   : _instance_id( instance_id )
   , _global_fec_oti( std::move(fec_oti) )

@@ -145,14 +145,17 @@ remember).
 | `OlderFdtIsRejectedAfterNewerSeen` | RFC 6726 §3.3 monotonicity | active (round-3, surfaces+fixes ReceiverBase `!=` bug) |
 | `RemovedFileEntryFromNewFdtDoesNotEvictExistingFile` | RFC 6726 §3.3 ¶5 | active (round-3) |
 | `RepeatedFdtWithSameInstanceIdIsIdempotent` | RFC 6726 §3.3 | active (round-3) |
-
-Planned for round 4:
-
-| Planned test | Spec | Notes |
-|--------------|------|-------|
-| `InstanceIdWraparoundAt2Pow20IsCircular` | RFC 6726 §3.3 (20-bit field, modular comparison) | needs comparison op exposed on FileDeliveryTable |
-| `ExpiredFdtInstanceIsRejected` | RFC 6726 §3.3 (Expires NTP semantics) | needs injectable clock |
-| `InFlightFdtCollisionWhenNewerInstanceArrivesMidReceive` | RFC 6726 §3.3 + latent ReceiverBase bug | the existing TOI=0 File is sized for v=N; a v=N+1 packet feeds bytes into it and produces garbage XML on completion |
+| `FdtInstanceIdComparator.ForwardSmallStepIsNewer` | RFC 1982 + RFC 6726 §3.3 | active (round-4) |
+| `FdtInstanceIdComparator.BackwardSmallStepIsNotNewer` | RFC 1982 + RFC 6726 §3.3 | active (round-4) |
+| `FdtInstanceIdComparator.EqualIsNotNewer` | RFC 1982 + RFC 6726 §3.3 | active (round-4) |
+| `FdtInstanceIdComparator.WraparoundForwardAcrossZero` | RFC 1982 + RFC 6726 §3.3 (20-bit wrap) | active (round-4) |
+| `FdtInstanceIdComparator.MidpointResolvesAsNotNewer` | RFC 1982 ambiguity resolution | active (round-4) |
+| `InstanceIdWraparoundAt2Pow20IsCircular` | RFC 6726 §3.3 (integration via DirectReceiver) | active (round-4) |
+| `FdtExpires.IsExpiredReturnsTrueWhenNowExceedsExpires` | RFC 6726 §3.3 Expires semantics | active (round-4) |
+| `ExpiredFdtInstanceIsRejectedAtParseTime` | RFC 6726 §3.3 (integration via DirectReceiver + injectable clock) | active (round-4) |
+| `NonExpiredFdtInstanceIsAccepted` | RFC 6726 §3.3 contrapositive | active (round-4) |
+| `InFlightFdtCollisionWhenNewerInstanceArrivesMidReceive` | RFC 6726 §3.3 + ReceiverBase routing | active (round-4, surfaces+fixes the latent in-flight collision) |
+| `InFlightFdtIgnoresOlderInstancePackets` | RFC 6726 §3.3 monotonicity (in-flight phase) | active (round-4) |
 
 ## Bugs fixed
 
@@ -163,9 +166,12 @@ Planned for round 4:
 | 2 | calculate_md5 broken `< 0` error path (unsigned return) | (libflute internal) | `324953a` |
 | 2 | EXT_FDT rejected FLUTE v2 | RFC 6726 §3.4.1 | `324953a` |
 | 2 | AlcPacket producer: redundant codepoint overwrite (latent) | RFC 6726 §5 | `324953a` |
-| 3 | FDT parser pattern-matched literal prefix instead of resolving xmlns:* declarations to URIs | XML Namespaces 1.0 §6.1 | (round-3 commit) |
-| 3 | mbms2007:Cache-Control `<xs:choice>` not enforced (multi-child documents accepted silently) | TS 26.346 cl. 7.2.10.2 + Rel-7 XSD | (round-3 commit) |
-| 3 | ReceiverBase used `!=` for FDT instance-ID comparison; older FDTs could supersede newer ones | RFC 6726 §3.3 monotonicity | (round-3 commit) |
+| 3 | FDT parser pattern-matched literal prefix instead of resolving xmlns:* declarations to URIs | XML Namespaces 1.0 §6.1 | `b608e7a` |
+| 3 | mbms2007:Cache-Control `<xs:choice>` not enforced (multi-child documents accepted silently) | TS 26.346 cl. 7.2.10.2 + Rel-7 XSD | `b608e7a` |
+| 3 | ReceiverBase used `!=` for FDT instance-ID comparison; older FDTs could supersede newer ones | RFC 6726 §3.3 monotonicity | `b608e7a` |
+| 4 | ReceiverBase linear `>` comparison didn't handle 20-bit instance-ID wraparound | RFC 6726 §3.3 + RFC 1982 | (round-4 commit) |
+| 4 | Receiver never checked FDT-Instance Expires; expired FDTs were applied indefinitely | RFC 6726 §3.3 Expires | (round-4 commit) |
+| 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | (round-4 commit) |
 
 ## Out of scope (future rounds)
 
@@ -177,6 +183,8 @@ Planned for round 4:
 | `mbms2015:IndependentUnitPositions` | Specialised incremental FEC repair |
 | XSD-validation pass on serialised FDT | Would need libxml2 for schema validation; structural tests cover drift adequately |
 | TSI-scope multi-source filtering | Needs source-IP awareness which DirectReceiver doesn't expose |
+| Default-namespace (`xmlns="..."` without prefix) handling in FDT parser | All MBMS FDT-Instance children are in the no-namespace bucket by spec; default-ns rebinding is not used in TS 26.346 examples |
+| Mid-element xmlns redeclaration | Pathological; not used in MBMS FDTs in practice |
 
 ## Test-writing rules
 

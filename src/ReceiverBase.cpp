@@ -14,6 +14,7 @@
 // under the License.
 //
 #include "ReceiverBase.h"
+#include <chrono>
 #include <ctime>
 #include <cstdint>
 #include <exception>
@@ -24,6 +25,14 @@
 #include "File.h"                                                   // for File
 #include "flute_types.h"
 #include "spdlog/spdlog.h"
+
+uint64_t LibFlute::ntp_seconds_now() {
+  // RFC 5905: NTP-epoch second count = seconds since 1900-01-01 UTC.
+  // Unix epoch (1970-01-01) is 2'208'988'800 seconds later.
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+             std::chrono::system_clock::now().time_since_epoch()).count()) +
+         2'208'988'800ULL;
+}
 
 
 
@@ -63,19 +72,54 @@ auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) ->
     {
       const std::lock_guard<std::mutex> lock(_files_mutex);
 
-      // RFC 6726 §3.3: only newer FDT-Instance IDs supersede the
-      // current FDT. Stale (lower-or-equal) IDs are dropped, both to
-      // make repeats idempotent and to defend against out-of-order or
-      // replayed packets that would otherwise roll the receiver back
-      // to an older file set.
-      // TODO (round 4): replace `>` with a circular comparator over
-      // the 20-bit instance-ID space (RFC 6726 §3.3 wraparound).
-      if (alc.toi() == 0 && (!_fdt || alc.fdt_instance_id() > _fdt->instance_id())) {
-        if (_files.find(alc.toi()) == _files.end()) {
+      // RFC 6726 §3.3 FDT-Instance routing.
+      //
+      // Three cases for an incoming TOI=0 packet:
+      //  (a) older than committed _fdt OR older than the in-flight
+      //      TOI=0 File's instance — drop. Replays / out-of-order.
+      //  (b) matches the in-flight File's instance — feed bytes
+      //      through the lower path (existing logic).
+      //  (c) newer than everything we know — replace any in-flight
+      //      File (sized for the OLD instance's transfer_length)
+      //      with a fresh one sized for THIS packet's EXT_FTI.
+      //      Without this, a v=N+1 packet arriving mid-receive of
+      //      v=N would feed bytes into the v=N File and corrupt
+      //      both. (RFC 6726 §3.3 + RFC 1982 circular comparison.)
+      if (alc.toi() == 0) {
+        const uint32_t new_id = alc.fdt_instance_id();
+        auto inflight_it = _files.find(0);
+        const bool have_inflight = inflight_it != _files.end();
+        const uint32_t inflight_id =
+            have_inflight ? inflight_it->second->fdt_instance_id() : 0;
+
+        const bool stale_vs_committed =
+            _fdt && !FileDeliveryTable::IsNewerInstanceId(
+                         new_id, _fdt->instance_id());
+        const bool stale_vs_inflight =
+            have_inflight && new_id != inflight_id &&
+            !FileDeliveryTable::IsNewerInstanceId(new_id, inflight_id);
+
+        if (stale_vs_committed || stale_vs_inflight) {
+          spdlog::debug("Discarding stale FDT packet (instance_id {})",
+                        new_id);
+          return;
+        }
+
+        // New instance preempts in-flight: erase the wrong-sized File
+        // before we allocate the right-sized one below.
+        if (have_inflight && new_id != inflight_id) {
+          spdlog::debug("FDT packet supersedes in-flight {} -> {}",
+                        inflight_id, new_id);
+          _files.erase(0);
+        }
+
+        if (_files.find(0) == _files.end()) {
           FileDeliveryTable::FileEntry fe{};
           fe.content_length = alc.fec_oti().transfer_length;
           fe.fec_oti        = alc.fec_oti();
-          _files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
+          auto file = std::make_shared<LibFlute::File>(fe);
+          file->set_fdt_instance_id(new_id);
+          _files.emplace(0, file);
         }
       }
 
@@ -115,16 +159,29 @@ auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) ->
           }
 
           if (alc.toi() == 0) { // parse complete FDT
-            _fdt = std::make_unique<LibFlute::FileDeliveryTable>(
-                alc.fdt_instance_id(), _files[alc.toi()]->buffer(), _files[alc.toi()]->length());
-
+            auto candidate = std::make_unique<LibFlute::FileDeliveryTable>(
+                alc.fdt_instance_id(), _files[alc.toi()]->buffer(),
+                _files[alc.toi()]->length());
             _files.erase(alc.toi());
-            for (const auto& file_entry : _fdt->file_entries()) {
-              // automatically receive all files in the FDT
-              if (_files.find(file_entry.toi) == _files.end()) {
-                spdlog::debug("Starting reception for file with TOI {}: {} ({})", file_entry.toi,
-                    file_entry.content_location, file_entry.content_type);
-                _files.emplace(file_entry.toi, std::make_shared<LibFlute::File>(file_entry));
+
+            // RFC 6726 §3.3: an FDT-Instance MUST NOT be relied upon
+            // after its Expires time. The current FDT (if any) stays
+            // in force; the expired candidate is dropped.
+            if (candidate->is_expired(_now())) {
+              spdlog::debug("Discarding expired FDT-Instance ID {} "
+                            "(Expires already past)",
+                            alc.fdt_instance_id());
+            } else {
+              _fdt = std::move(candidate);
+              for (const auto& file_entry : _fdt->file_entries()) {
+                // automatically receive all files in the FDT
+                if (_files.find(file_entry.toi) == _files.end()) {
+                  spdlog::debug("Starting reception for file with TOI {}: {} ({})",
+                                file_entry.toi, file_entry.content_location,
+                                file_entry.content_type);
+                  _files.emplace(file_entry.toi,
+                                 std::make_shared<LibFlute::File>(file_entry));
+                }
               }
             }
           }

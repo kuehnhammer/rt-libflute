@@ -28,6 +28,16 @@ namespace LibFlute { class File; }
 
 namespace LibFlute {
   /**
+   *  Returns the current NTP-epoch second count (seconds since
+   *  1900-01-01 00:00:00 UTC). Used as the default clock for FDT
+   *  Expires-attribute checking. Tests inject their own clock via
+   *  ReceiverBase::set_now_provider().
+   */
+  uint64_t ntp_seconds_now();
+}
+
+namespace LibFlute {
+  /**
    *  Abstract FLUTE receiver base class. All receiver types inherit from this.
    *
    *  The base class is transport-agnostic: it knows nothing about sockets,
@@ -85,6 +95,16 @@ namespace LibFlute {
       void register_completion_callback(completion_callback_t cb);
 
      /**
+      *  Inject a clock used to evaluate FDT-Instance Expires (RFC
+      *  6726 §3.3). The function is called with no arguments and
+      *  returns NTP-epoch seconds. Default is `ntp_seconds_now()`.
+      *  Tests use this to feed deterministic timestamps; do not call
+      *  in production code.
+      */
+      using NowProvider = std::function<uint64_t()>;
+      void set_now_provider(NowProvider fn) { _now = std::move(fn); }
+
+     /**
       *  Stop the receiver and clean up
       */
       virtual void stop() = 0;
@@ -96,6 +116,7 @@ namespace LibFlute {
       void handle_received_packet(char* data, size_t bytes);
 
       uint64_t _tsi;
+      NowProvider _now = ntp_seconds_now;
 
     private:
       std::unique_ptr<LibFlute::FileDeliveryTable> _fdt;

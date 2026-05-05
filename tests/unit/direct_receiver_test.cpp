@@ -47,7 +47,11 @@ std::string BuildFdtXml(std::uint32_t file_toi, std::uint64_t file_size,
                           std::uint32_t T, std::uint32_t max_sbl) {
     std::string xml;
     xml += R"(<?xml version="1.0" encoding="UTF-8"?>)";
-    xml += "\n<FDT-Instance Expires=\"2208988800\"";
+    // NTP-epoch seconds for ~year 2058 — far enough out that the
+    // receiver's Expires check (RFC 6726 §3.3) treats this FDT as
+    // valid for the foreseeable future. Tests that need to exercise
+    // the EXPIRED branch override the receiver's clock.
+    xml += "\n<FDT-Instance Expires=\"5000000000\"";
     xml += " FEC-OTI-FEC-Encoding-ID=\"0\"";
     xml += " FEC-OTI-Maximum-Source-Block-Length=\"" + std::to_string(max_sbl) + "\"";
     xml += " FEC-OTI-Encoding-Symbol-Length=\"" + std::to_string(T) + "\">\n";
