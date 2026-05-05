@@ -18,6 +18,10 @@
 //   FLUTE_BENCH_SIZES_MB="10,100"      // comma-separated
 //   FLUTE_BENCH_MTU=1500
 //   FLUTE_BENCH_SKIP_RAPTOR=1          // skip Raptor scenarios
+//   FLUTE_BENCH_DROP_EVERY=20          // drop every Nth file packet
+//                                      // (TOI ≠ 0). Exercises Raptor's
+//                                      // repair path; CompactNoCode would
+//                                      // fail to reassemble. 0 = no drops.
 
 #include <chrono>
 #include <cstdint>
@@ -64,9 +68,20 @@ struct ScenarioResult {
     Clock::duration decoder_time{};   // wall-clock time spent in feed_packet
     Clock::duration total_time{};
     bool ok = false;
+    int drop_every = 0;
+    std::size_t dropped_count = 0;
     LibFlute::EncoderStats es{};
     LibFlute::DecoderStats ds{};
 };
+
+// Inspect the LCT half-word TOI without round-tripping through
+// AlcPacket. The Encoder always emits half_word_flag=1 / toi_flag=0,
+// so TOI sits at offset 10..11 (LCT base 4 + CCI 4 + TSI half 2).
+inline std::uint16_t ToiOf(std::span<const std::uint8_t> packet) {
+    if (packet.size() < 12) return 0xFFFF;
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[10]) << 8) | packet[11]);
+}
 
 const char* FecName(LibFlute::FecScheme s) {
     switch (s) {
@@ -77,10 +92,11 @@ const char* FecName(LibFlute::FecScheme s) {
 }
 
 ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
-                              unsigned mtu) {
+                              unsigned mtu, int drop_every = 0) {
     ScenarioResult r;
     r.F   = F;
     r.fec = fec;
+    r.drop_every = drop_every;
 
     auto data = std::make_unique<char[]>(F);
     FillDeterministic(data.get(), F);
@@ -91,10 +107,24 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
         [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });
 
     Clock::duration decode_time_acc{};
+    std::size_t file_packet_idx = 0;
+    std::size_t dropped = 0;
 
     LibFlute::Encoder encoder(
         /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
         [&](std::span<const std::uint8_t> packet) -> bool {
+            // Lossy path: drop every Nth file packet (TOI != 0).
+            // FDT packets always pass — without the FDT the
+            // receiver can't decode metadata. Loss is deterministic
+            // so wall-clock comparison stays meaningful.
+            if (drop_every > 0 && ToiOf(packet) != 0) {
+                ++file_packet_idx;
+                if (file_packet_idx %
+                        static_cast<std::size_t>(drop_every) == 0) {
+                    ++dropped;
+                    return true;
+                }
+            }
             const auto t0 = Clock::now();
             decoder.feed_packet(packet);
             decode_time_acc += Clock::now() - t0;
@@ -117,6 +147,7 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
     r.decoder_time = decode_time_acc;
     r.es           = encoder.stats();
     r.ds           = decoder.stats();
+    r.dropped_count = dropped;
 
     r.ok = (received != nullptr) &&
            received->complete() &&
@@ -127,21 +158,26 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
 
 void PrintHeader(unsigned mtu) {
     std::printf("== libflute round-trip benchmark (mtu=%u) ==\n\n", mtu);
-    std::printf("%-7s  %-13s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
-                "F (MB)", "FEC",
+    std::printf("%-7s  %-13s  %-9s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+                "F (MB)", "FEC", "loss",
                 "packets", "src syms", "rep syms",
                 "enc (ms)", "dec (ms)", "throughput", "overhead");
-    std::printf("%-7s  %-13s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
-                "-------", "-------------",
+    std::printf("%-7s  %-13s  %-9s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+                "-------", "-------------", "---------",
                 "------------", "------------", "------------",
                 "----------", "----------", "--------------", "--------");
 }
 
 void PrintRow(const ScenarioResult& r) {
+    char loss_label[16] = "lossless";
+    if (r.drop_every > 0) {
+        std::snprintf(loss_label, sizeof(loss_label),
+                       "1in%d", r.drop_every);
+    }
     if (!r.ok) {
-        std::printf("%-7.0f  %-13s  ROUND-TRIP FAILED\n",
+        std::printf("%-7.0f  %-13s  %-9s  ROUND-TRIP FAILED (%zu drops)\n",
                     static_cast<double>(r.F) / (1024.0 * 1024.0),
-                    FecName(r.fec));
+                    FecName(r.fec), loss_label, r.dropped_count);
         return;
     }
     const double mb = static_cast<double>(r.F) / (1024.0 * 1024.0);
@@ -153,8 +189,8 @@ void PrintRow(const ScenarioResult& r) {
             ? 100.0 * static_cast<double>(r.es.repair_symbols_emitted) /
                   static_cast<double>(r.es.source_symbols_emitted)
             : 0.0;
-    std::printf("%-7.0f  %-13s  %12llu  %12llu  %12llu  %10.1f  %10.1f  %11.1f MB/s  %6.1f%% (%6.2f MB)\n",
-                mb, FecName(r.fec),
+    std::printf("%-7.0f  %-13s  %-9s  %12llu  %12llu  %12llu  %10.1f  %10.1f  %11.1f MB/s  %6.1f%% (%6.2f MB)\n",
+                mb, FecName(r.fec), loss_label,
                 static_cast<unsigned long long>(r.es.packets_emitted),
                 static_cast<unsigned long long>(r.es.source_symbols_emitted),
                 static_cast<unsigned long long>(r.es.repair_symbols_emitted),
@@ -192,6 +228,15 @@ int main() {
         mtu = static_cast<unsigned>(std::strtoul(m, nullptr, 10));
     }
     const bool skip_raptor = std::getenv("FLUTE_BENCH_SKIP_RAPTOR") != nullptr;
+    // Lossy bench runs alongside the lossless one when this is set.
+    // The lossy column exercises the K+1 opportunistic-decode path
+    // because at least one source ESI per source block is dropped,
+    // so the lossless short-circuit (all source ESIs received) does
+    // not fire — instead Decoder::TryDecode runs the matrix factor.
+    int drop_every = 0;
+    if (const char* d = std::getenv("FLUTE_BENCH_DROP_EVERY"); d && *d) {
+        drop_every = static_cast<int>(std::strtol(d, nullptr, 10));
+    }
 
     PrintHeader(mtu);
     for (auto F : ParseSizesEnv()) {
@@ -201,9 +246,15 @@ int main() {
         if (!skip_raptor) {
             auto rr = RunScenario(F, LibFlute::FecScheme::Raptor, mtu);
             PrintRow(rr);
+            if (drop_every > 0) {
+                auto rl = RunScenario(F, LibFlute::FecScheme::Raptor,
+                                      mtu, drop_every);
+                PrintRow(rl);
+            }
         }
 #else
         (void)skip_raptor;
+        (void)drop_every;
 #endif
         std::fflush(stdout);
     }

@@ -51,6 +51,21 @@ namespace LibFlute {
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
         bool decoded = false;           // cached IsDecoded() so we don't re-call TryDecode
+        // Source ESIs (id < K) received so far for this block.
+        // When this reaches K we know the lossless short-circuit
+        // inside Decoder::TryDecode will fire (every source symbol
+        // arrived intact ⇒ permute by ESI, no matrix work). At that
+        // moment the block can decode for the cost of a K×T memcpy
+        // (~1 ms per block at K=8000, T=1424). For lossy reception
+        // (≥1 source missing) we deliberately defer to the FDT
+        // end-of-transmission try_decode_pending path so the
+        // ~58 ms-per-block matrix factor is batched at the end and
+        // doesn't compete with the encoder's per-packet work mid-
+        // stream. A bench at drop_every=8000 (1 drop/block) shows
+        // mid-stream matrix factoring is a net 13 % regression vs.
+        // batched even though total CPU work is identical.
+        std::uint32_t source_esi_count = 0;
+        bool attempted_lossless_kp1 = false;
       };
 
       // Per-source-block decoder state; survives across process_symbol()

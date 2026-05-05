@@ -145,14 +145,24 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
   assert(symbol.length == T);
   DecoderCtx& ctx = ensure_dec_ctx(static_cast<std::uint16_t>(srcblk.id));
   if (ctx.decoded) {
-    spdlog::warn("Skipped processing of symbol for finished block: SBN {}, ESI {}",
-                 srcblk.id, id);
+    // Block already decoded (almost always via the K+1 opportunistic
+    // path in check_source_block_completion). Subsequent symbols are
+    // expected redundancy from the encoder's repair overhead — drop
+    // them silently. Used to be spdlog::warn here, which was free
+    // pre-R10 (block decoded only at FDT end-of-transmission, never
+    // mid-stream) but is hot now: ~0.15·K symbols per block fire it
+    // after early decode lands.
+    spdlog::trace("Skipped symbol after early decode: SBN {}, ESI {}",
+                  srcblk.id, id);
     return true;
   }
   ctx.dec->AddReceivedSymbol(
       id,
       std::span<const std::byte>(
           reinterpret_cast<const std::byte*>(symbol.data), symbol.length));
+  if (id < ctx.K) {
+    ++ctx.source_esi_count;
+  }
   return true;
 }
 
@@ -184,17 +194,43 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
     return complete;
   }
 
-  // Decoder side. Per-symbol completion-check is now CHEAP — we just
-  // report whether this block has already been decoded. The actual
-  // TryDecode call is deferred to try_decode_pending(), which the
-  // FLUTE layer triggers once the file's transmission has ended
-  // (e.g. its TOI is no longer listed in the FDT). Calling TryDecode
-  // per received symbol — as the previous code did — paid the
-  // schedule-construction cost ~K × 1.15 times per source block,
-  // which dominated the round-trip wall time at K = 8192.
+  // Decoder side. Per-symbol completion-check is cheap by design.
+  // We fire TryDecode exactly once per block, at the precise moment
+  // the lossless short-circuit becomes applicable: every source ESI
+  // (id < K) for this block has arrived. At that point Decoder::-
+  // TryDecode's lossless short-circuit permutes the receive buffer
+  // by ESI in ~1 ms — no matrix work, no allocation pressure that
+  // competes with concurrent encoder packet emission. The block is
+  // then released for the rest of its repair-symbol stream to be
+  // ignored at put_symbol's block.complete early-return.
+  //
+  // The expensive lossy path (≥1 source ESI lost ⇒ matrix factor
+  // ~58 ms at K=8000) is intentionally NOT triggered here. Mid-
+  // stream matrix factoring is a net regression in the bench
+  // (cache+TLB contention with concurrent encoder work; +13 % wall
+  // at drop_every=8000) for no compensating throughput benefit —
+  // total CPU work is the same as batching at end-of-transmission.
+  // The FDT-trigger try_decode_pending() path picks up any
+  // undecoded blocks at the natural batch boundary.
   auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
   if (it == _dec_ctxs.end()) return false;
-  return it->second.decoded;
+  DecoderCtx& ctx = it->second;
+  if (ctx.decoded) return true;
+
+  if (!ctx.attempted_lossless_kp1 &&
+      ctx.source_esi_count == ctx.K) {
+    ctx.attempted_lossless_kp1 = true;
+    // Trying TryDecode here is guaranteed to hit the lossless short-
+    // circuit (every source ESI present); the matrix-factor branch
+    // below it never runs from this call site. Asserted by the
+    // existing 100 round-trip tests + the bitstem-r10
+    // LosslessShortCircuit unit tests.
+    if (ctx.dec->TryDecode()) {
+      ctx.decoded = true;
+      return true;
+    }
+  }
+  return false;
 }
 
 bool LibFlute::RaptorFEC::try_decode_pending(
