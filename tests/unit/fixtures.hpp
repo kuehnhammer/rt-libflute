@@ -90,6 +90,40 @@ inline void AppendBE48(std::vector<std::uint8_t>& v, std::uint64_t x) {
 }
 
 // ---------------------------------------------------------------------------
+// EXT_NOP (RFC 5651 §3.2.5.1) — variable-length no-op extension. HET=0,
+// HEL >= 1 (length in 32-bit words including HET+HEL). Content bytes
+// are reserved/padding (all zero in this fixture).
+inline std::vector<std::uint8_t> BuildExtNop(std::uint8_t hel) {
+    std::vector<std::uint8_t> b(static_cast<std::size_t>(hel) * 4U, 0U);
+    b[0] = 0;     // HET = EXT_NOP
+    b[1] = hel;   // HEL in 32-bit words
+    return b;
+}
+
+// ---------------------------------------------------------------------------
+// EXT_AUTH (RFC 5651 §3.2.5.3) — variable-length packet-authentication
+// extension. HET=1, HEL >= 1. Content depends on the auth scheme; this
+// fixture emits zeros, which receivers must skip without parsing.
+inline std::vector<std::uint8_t> BuildExtAuth(std::uint8_t hel) {
+    std::vector<std::uint8_t> b(static_cast<std::size_t>(hel) * 4U, 0U);
+    b[0] = 1;     // HET = EXT_AUTH
+    b[1] = hel;
+    return b;
+}
+
+// ---------------------------------------------------------------------------
+// EXT_TIME (RFC 5651 §3.2.5.4) — variable-length sender-time extension.
+// HET=2, HEL >= 1. Content is a flag byte + zero or more NTP timestamps;
+// this fixture emits zeros to test that receivers skip the extension
+// regardless of HEL.
+inline std::vector<std::uint8_t> BuildExtTime(std::uint8_t hel) {
+    std::vector<std::uint8_t> b(static_cast<std::size_t>(hel) * 4U, 0U);
+    b[0] = 2;     // HET = EXT_TIME
+    b[1] = hel;
+    return b;
+}
+
+// ---------------------------------------------------------------------------
 // EXT_FDT (RFC 6726 §3.4.1) — 4 bytes total, het >= 128 (no HEL byte).
 //   byte 0: HET = 192
 //   byte 1: V (4 bits, FLUTE version) | upper 4 bits of FDT-Instance ID

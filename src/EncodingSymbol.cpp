@@ -68,16 +68,25 @@ auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len,
     throw std::runtime_error("FEC OTI encoding_symbol_length is zero");
   }
 
-  int nof_symbols = std::ceil((float)data_len / (float)fec_oti.encoding_symbol_length);
-  for (int i = 0; i < nof_symbols; i++) {
+  // Carve the payload into encoding_symbol_length-sized chunks. RFC 5052
+  // §9.1: when transfer_length is not an exact multiple of T, the LAST
+  // symbol of the source block carries the residual bytes (< T). We
+  // track remaining_data per iteration so the trailing symbol reports
+  // the true residual length, not T.
+  size_t remaining_data = data_len;
+  while (remaining_data > 0) {
+    const size_t this_symbol_len =
+        std::min(remaining_data, static_cast<size_t>(fec_oti.encoding_symbol_length));
     switch (fec_oti.encoding_id) {
       default:
       case FecScheme::CompactNoCode:
       case FecScheme::Raptor:
-        symbols.emplace_back(encoding_symbol_id, source_block_number, encoded_data, std::min(data_len, (size_t)fec_oti.encoding_symbol_length), fec_oti.encoding_id);
+        symbols.emplace_back(encoding_symbol_id, source_block_number,
+                             encoded_data, this_symbol_len, fec_oti.encoding_id);
         break;
     }
-    encoded_data += fec_oti.encoding_symbol_length;
+    encoded_data    += fec_oti.encoding_symbol_length;
+    remaining_data  -= this_symbol_len;
     encoding_symbol_id++;
   }
 

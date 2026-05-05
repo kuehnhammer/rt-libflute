@@ -208,9 +208,14 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
       case EXT_NOP:
       case EXT_AUTH:
       case EXT_TIME: {
-        hdr_ptr += 3;
-        consumed += 3;
-        break;  // ignored
+        // RFC 5651 §3.2.5.1/.3/.4: skip (HEL*4 - 2) content bytes; HET
+        // and HEL have already been consumed above. Previous code
+        // hard-coded += 3, which over-advanced for HEL=1 and
+        // under-advanced for HEL>=2, misaligning the next iteration.
+        const size_t content_bytes = static_cast<size_t>(hel) * 4U - 2U;
+        hdr_ptr  += content_bytes;
+        consumed += content_bytes;
+        break;
       }
       case EXT_FTI: {
         switch (_fec_oti.encoding_id) {
@@ -249,9 +254,12 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
         break;
       }
       case EXT_FDT: {
+        // RFC 6726 §3.4.1: FLUTE v2 sets V=2. RFC 3926 (FLUTE v1) used
+        // V=1. Accept both — anything else is malformed or from an
+        // unsupported future revision.
         uint8_t flute_version = (*hdr_ptr & 0xF0) >> 4;
-        if (flute_version != 1) {
-          throw std::runtime_error("Only FLUTE version 1 is supported");
+        if (flute_version != 1 && flute_version != 2) {
+          throw std::runtime_error("Unsupported FLUTE version in EXT_FDT");
         }
         _fdt_instance_id = (*hdr_ptr & 0x0F) << 16;
         hdr_ptr++;
@@ -305,7 +313,6 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     throw std::runtime_error("Unsupported FEC scheme");
   }
   lct_header->lct_header_len = lct_header_len;
-  lct_header->codepoint = (uint8_t)_fec_oti.encoding_id;
   auto* hdr_ptr = _buffer + 4;
   auto* payload_ptr = _buffer + 4UL * lct_header_len;
 

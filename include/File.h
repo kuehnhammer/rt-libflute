@@ -161,9 +161,12 @@ namespace LibFlute {
   *  @param input byte array whose md5 message digest shall be calculated
   *  @param length size of the input array
   *  @param result buffer to store the output of the md5 calculation. Make sure it is EVP_MAX_MD_SIZE bytes large
-  * 
-  *  @return length of the calculated md5 sum (should be 16 bytes for md5)
+  *
+  *  @return length of the calculated md5 sum (should be 16 bytes for md5),
+  *          or a negative sentinel on invalid input. Return type is int
+  *          (signed) so that `if (calculate_md5(...) < 0)` evaluates as
+  *          intended at every call site.
   */
-  unsigned int calculate_md5(char *input, size_t length, unsigned char *result);
+  int calculate_md5(char *input, size_t length, unsigned char *result);
 
 };

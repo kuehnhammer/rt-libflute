@@ -295,9 +295,9 @@ auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, 
   }
 }
 
-auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) -> unsigned int
+auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) -> int
 {
-  // simple implementation based on openssl docs (https://www.openssl.org/docs/man3.0/man3/EVP_DigestInit_ex.html) 
+  // simple implementation based on openssl docs (https://www.openssl.org/docs/man3.0/man3/EVP_DigestInit_ex.html)
   if (input == nullptr || length == 0U) {
     spdlog::error("MD5 called with invalid input");
     return -1;
@@ -319,5 +319,5 @@ auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) 
   }
   spdlog::debug("MD5 Digest is {}", buf);
 
-  return md_len;
+  return static_cast<int>(md_len);
 }

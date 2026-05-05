@@ -26,9 +26,12 @@ using libflute_test::AppendBytes;
 using libflute_test::AppendBE16;
 using libflute_test::AppendBE32;
 using libflute_test::BuildDataPacket;
+using libflute_test::BuildExtAuth;
 using libflute_test::BuildExtCenc;
 using libflute_test::BuildExtFdt;
 using libflute_test::BuildExtFtiCompactNoCode;
+using libflute_test::BuildExtNop;
+using libflute_test::BuildExtTime;
 using libflute_test::DataPacketSpec;
 using libflute_test::EncodeLctBase;
 using libflute_test::LctV1Base;
@@ -205,12 +208,39 @@ TEST(AlcPacket, ParsesExtFdtVersionOneAndExtractsInstanceId) {
     EXPECT_EQ(p.fdt_instance_id(), 0xABCDEu);
 }
 
+// RFC 6726 §3.4.1 specifies FLUTE Version = 2 in EXT_FDT (FLUTE v2);
+// RFC 3926 (the older FLUTE) used Version = 1. An MBMS-conformant
+// receiver MUST accept v2; a backward-compatible one accepts v1 too.
+// Anything else is rejected to catch malformed packets early.
 TEST(AlcPacket, AcceptsExtFdtVersionTwoPerRfc6726) {
-    GTEST_SKIP() << "RFC 6726 §3.4.1 specifies FLUTE Version = 2 in EXT_FDT, "
-                    "but AlcPacket.cpp:253-255 hardcodes Version == 1 (the "
-                    "FLUTE v1 / RFC 3926 value). Documenting this deviation; "
-                    "fix-then-unskip when the parser is updated to accept "
-                    "version 2 (and ideally version 1 for back-compat).";
+    DataPacketSpec spec;
+    spec.toi = 0;
+    spec.add_ext_fdt = true;
+    spec.fdt_instance_id = 0x12345;
+    auto buf = BuildDataPacket(spec);
+    // Patch the EXT_FDT FLUTE-version nibble from 1 → 2 in place. The
+    // EXT_FDT extension is the FIRST extension after the LCT base + CCI
+    // + TSI half + TOI half (offsets 0..11), so the HET=192 byte is at
+    // offset 12 and the version+upper-nibble byte is at offset 13.
+    ASSERT_EQ(buf[12], 192u);
+    buf[13] = static_cast<std::uint8_t>(2u << 4 | (0x12345u >> 16) & 0x0Fu);
+    auto p = Parse(buf);
+    EXPECT_EQ(p.fdt_instance_id(), 0x12345u);
+}
+
+// FLUTE Version = 1 (RFC 3926) is still common in legacy senders. The
+// receiver should accept it for back-compat — the existing
+// ParsesExtFdtVersionOneAndExtractsInstanceId test covers this case.
+// Versions other than 1 and 2 must be rejected.
+TEST(AlcPacket, RejectsExtFdtVersionThreeAndAbove) {
+    DataPacketSpec spec;
+    spec.toi = 0;
+    spec.add_ext_fdt = true;
+    spec.fdt_instance_id = 0x42;
+    auto buf = BuildDataPacket(spec);
+    ASSERT_EQ(buf[12], 192u);
+    buf[13] = static_cast<std::uint8_t>(3u << 4 | 0x0u);  // version 3
+    EXPECT_THROW(Parse(buf), std::runtime_error);
 }
 
 // -----------------------------------------------------------------------------
@@ -290,6 +320,109 @@ TEST(AlcPacket, RejectsExtensionRunningPastLctHeaderEnd) {
     // Some payload bytes so total packet length exceeds LCT header length.
     AppendBE32(buf, 0xDEADBEEF);
     EXPECT_THROW(Parse(buf), std::runtime_error);
+}
+
+// -----------------------------------------------------------------------------
+// RFC 5651 §3.2.5.1 EXT_NOP: variable-length no-op extension. The parser
+// MUST advance past it by HEL × 4 bytes total (HEL words including the
+// HET+HEL bytes themselves), preserving alignment for any following
+// extension. Construct a packet whose LCT header carries EXT_NOP (HEL=1)
+// followed by EXT_FDT, and verify that the EXT_FDT instance ID still
+// parses correctly.
+TEST(AlcPacket, ParsesExtNopHelOneFollowedByExtFdt) {
+    // base(4) + CCI(4) + TSI/TOI half(4) + EXT_NOP(4) + EXT_FDT(4) = 20B = 5 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 5;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);                  // CCI
+    AppendBE16(buf, 1);                  // TSI half-word
+    AppendBE16(buf, 7);                  // TOI half-word
+    AppendBytes(buf, BuildExtNop(/*hel=*/1));
+    AppendBytes(buf, BuildExtFdt(/*flute_version=*/1, /*instance_id=*/0xABCDE));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.tsi(), 1u);
+    EXPECT_EQ(p.toi(), 7u);
+    EXPECT_EQ(p.fdt_instance_id(), 0xABCDEu);
+}
+
+// Two consecutive EXT_NOP (HEL=1) extensions in the LCT header. The
+// parser MUST advance each by exactly 4 bytes; misalignment causes the
+// second iteration to read garbage as the next HET byte.
+TEST(AlcPacket, ParsesTwoConsecutiveExtNopHelOne) {
+    // base + CCI + TSI/TOI half + 2 × EXT_NOP = 4 + 4 + 4 + 8 = 20B = 5 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 5;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);                  // CCI
+    AppendBE16(buf, 5);                  // TSI
+    AppendBE16(buf, 11);                 // TOI
+    AppendBytes(buf, BuildExtNop(/*hel=*/1));
+    AppendBytes(buf, BuildExtNop(/*hel=*/1));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.tsi(), 5u);
+    EXPECT_EQ(p.toi(), 11u);
+}
+
+// EXT_NOP with HEL=2 (8-byte extension). Common in real packets when
+// senders pad the LCT header for alignment. The parser MUST skip
+// (HEL*4 - 2) = 6 content bytes, not a fixed 3.
+TEST(AlcPacket, ParsesExtNopHelTwoFollowedByExtFdt) {
+    // base + CCI + TSI/TOI half + EXT_NOP(HEL=2, 8B) + EXT_FDT(4B) = 24B = 6 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 6;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);                  // CCI
+    AppendBE16(buf, 9);                  // TSI
+    AppendBE16(buf, 3);                  // TOI
+    AppendBytes(buf, BuildExtNop(/*hel=*/2));
+    AppendBytes(buf, BuildExtFdt(/*flute_version=*/1, /*instance_id=*/0x12345));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.tsi(), 9u);
+    EXPECT_EQ(p.toi(), 3u);
+    EXPECT_EQ(p.fdt_instance_id(), 0x12345u);
+}
+
+// EXT_AUTH and EXT_TIME share the same skip-the-content code path as
+// EXT_NOP. A receiver that doesn't validate the auth/time content MUST
+// still advance past them correctly.
+TEST(AlcPacket, ParsesExtAuthAndExtTimeFollowedByExtFdt) {
+    // base + CCI + TSI/TOI half + EXT_AUTH(HEL=1) + EXT_TIME(HEL=1) + EXT_FDT
+    //   = 4 + 4 + 4 + 4 + 4 + 4 = 24B = 6 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 6;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);                  // CCI
+    AppendBE16(buf, 1);                  // TSI
+    AppendBE16(buf, 1);                  // TOI
+    AppendBytes(buf, BuildExtAuth(/*hel=*/1));
+    AppendBytes(buf, BuildExtTime(/*hel=*/1));
+    AppendBytes(buf, BuildExtFdt(/*flute_version=*/1, /*instance_id=*/0x55555));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.fdt_instance_id(), 0x55555u);
 }
 
 // -----------------------------------------------------------------------------

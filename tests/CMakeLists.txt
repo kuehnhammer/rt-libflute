@@ -8,6 +8,7 @@ add_executable(libflute_tests
   unit/fdt_test.cpp
   unit/fdt_mbms_test.cpp
   unit/file_partitioning_test.cpp
+  unit/file_test.cpp
   unit/direct_receiver_test.cpp
 )
 

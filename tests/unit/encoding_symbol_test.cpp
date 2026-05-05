@@ -204,21 +204,7 @@ TEST(EncodingSymbolRoundTrip, ToPayloadFromPayloadPreservesEsiSequence) {
 // of the source block carries the residual bytes (length < T) per the
 // "B small / B large" partitioning rules. Receivers MUST report the
 // last-symbol length truthfully so the assembler can place it.
-//
-// Bug present in EncodingSymbol::from_payload (src/EncodingSymbol.cpp,
-// loop in from_payload): `data_len` is captured once and never
-// decremented inside the per-symbol emplace loop, so every emplaced
-// symbol gets `min(data_len, T) == T` rather than the true residual
-// for the trailing partial symbol. Documented here via GTEST_SKIP so
-// CI stays green; remove the skip once the loop tracks the remaining
-// payload length.
 TEST(EncodingSymbolFromPayload, LastPartialSymbolHasCorrectLength) {
-    GTEST_SKIP() << "Known bug: from_payload does not decrement data_len "
-                    "inside the per-symbol loop, so the trailing partial "
-                    "symbol reports len()==T instead of the residual. "
-                    "RFC 5052 §9.1 requires the last symbol of a block to "
-                    "carry < T bytes when transfer_length mod T != 0.";
-
     constexpr std::uint32_t T = 8;
     // 1 full symbol (8 bytes) + 1 partial (3 bytes) = 11 bytes of body.
     std::vector<std::uint8_t> body(11, 0x55);
@@ -231,5 +217,5 @@ TEST(EncodingSymbolFromPayload, LastPartialSymbolHasCorrectLength) {
 
     ASSERT_EQ(symbols.size(), 2U);
     EXPECT_EQ(symbols[0].len(), 8U);
-    EXPECT_EQ(symbols[1].len(), 3U);  // currently fails: returns 8.
+    EXPECT_EQ(symbols[1].len(), 3U);
 }
