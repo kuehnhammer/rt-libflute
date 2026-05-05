@@ -220,15 +220,20 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
   if (!ctx.attempted_lossless_kp1 &&
       ctx.source_esi_count == ctx.K) {
     ctx.attempted_lossless_kp1 = true;
-    // Trying TryDecode here is guaranteed to hit the lossless short-
-    // circuit (every source ESI present); the matrix-factor branch
-    // below it never runs from this call site. Asserted by the
-    // existing 100 round-trip tests + the bitstem-r10
-    // LosslessShortCircuit unit tests.
-    if (ctx.dec->TryDecode()) {
-      ctx.decoded = true;
-      return true;
-    }
+    // Skip the bitstem-r10 lossless short-circuit entirely. Every
+    // source ESI for this block has arrived, and File::put_symbol
+    // wrote each one's bytes to file_buffer[block_offset + esi*T]
+    // via Symbol::data — so the file buffer ALREADY holds the
+    // correct K source symbols for this block. Calling TryDecode
+    // would only round-trip the bytes through the Decoder's
+    // _source_block (alloc K*T per block + permute by ESI + later
+    // extract_finished_block memcpy back to the file buffer) for
+    // a net no-op modulo K*T·4 of redundant copies and ~50 fresh
+    // K*T allocations per file. Just mark the block decoded and
+    // flag the extract path to skip the memcpy.
+    ctx.decoded                       = true;
+    ctx.skipped_via_lossless_libflute = true;
+    return true;
   }
   return false;
 }
@@ -261,6 +266,12 @@ void LibFlute::RaptorFEC::extract_finished_block(LibFlute::SourceBlock& srcblk,
                                                   DecoderCtx& ctx) {
   if (!ctx.decoded) {
     spdlog::warn("extract_finished_block called on non-decoded SBN {}", srcblk.id);
+    return;
+  }
+  if (ctx.skipped_via_lossless_libflute) {
+    // File buffer already holds the correct source bytes — every
+    // received source ESI's put_symbol wrote them straight to the
+    // file buffer via Symbol::data. Nothing to extract.
     return;
   }
   // The new r10 API hands us the recovered K source bytes as one

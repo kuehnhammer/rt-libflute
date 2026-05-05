@@ -52,6 +52,13 @@ namespace LibFlute {
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
         bool decoded = false;           // cached IsDecoded() so we don't re-call TryDecode
+        // True iff the block was completed via the libflute-side
+        // lossless skip path (every source ESI received in its
+        // natural file-buffer slot via Symbol::data ⇒ no bitstem-r10
+        // TryDecode call, no extract_finished_block memcpy needed).
+        // The file buffer already holds the correct source bytes;
+        // extract_finished_block becomes a no-op for this block.
+        bool skipped_via_lossless_libflute = false;
         // Source ESIs (id < K) received so far for this block.
         // When this reaches K we know the lossless short-circuit
         // inside Decoder::TryDecode will fire (every source symbol
