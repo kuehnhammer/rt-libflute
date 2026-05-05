@@ -171,6 +171,7 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
   if (!target_symbol.complete) {
     symbol.decode_to(target_symbol.data, target_symbol.length);
     target_symbol.complete = true;
+    ++source_block.completed_symbol_count;
     if (_meta.fec_transformer) {
       _meta.fec_transformer->process_symbol(source_block,target_symbol,symbol.id());
     }
@@ -182,18 +183,30 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
 
 auto LibFlute::File::check_source_block_completion( SourceBlock& block ) -> void
 {
+  const bool was_complete = block.complete;
   if (_meta.fec_transformer) {
     block.complete = _meta.fec_transformer->check_source_block_completion(block);
-    return;
+  } else {
+    // CompactNoCode: block is complete iff every Symbol's `complete`
+    // bit is set. completed_symbol_count is maintained as those bits
+    // transition false→true, so a counter compare is exact and
+    // avoids an O(K) std::all_of after every packet.
+    block.complete =
+        (block.completed_symbol_count == block.symbols.size());
   }
-  block.complete = std::all_of(block.symbols.begin(), block.symbols.end(),
-                                [](const auto& sym) { return sym.complete; });
+  if (!was_complete && block.complete) {
+    ++_complete_block_count;
+  }
 }
 
 auto LibFlute::File::check_file_completion() -> void
 {
-  _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(),
-                            [](const auto& block) { return block.complete; });
+  // O(1): _complete_block_count is bumped exactly once per block as
+  // its complete bit transitions in check_source_block_completion.
+  // The previous std::all_of was hot on the encoder path (called
+  // per dispatched packet) and quadratic in Z for CompactNoCode
+  // files with thousands of blocks.
+  _complete = (_complete_block_count == _source_blocks.size());
 
   if (_complete && !_meta.content_md5.empty()) {
       if(_meta.fec_transformer){
@@ -313,8 +326,15 @@ auto LibFlute::File::try_decode_pending() -> void
     return;  // CompactNoCode: nothing to do, completion already tracked.
   }
   if (_meta.fec_transformer->try_decode_pending(_source_blocks)) {
-    // At least one source block decoded successfully; re-run file-
-    // level completion check so the caller can dispatch the file.
+    // At least one source block decoded successfully. The FEC layer
+    // sets SourceBlock.complete directly when decoding finishes, so
+    // the per-block transition counter that check_source_block_-
+    // completion maintains was not bumped — re-derive it from the
+    // current block.complete bits before running the file-level
+    // check.
+    _complete_block_count = static_cast<uint32_t>(std::count_if(
+        _source_blocks.begin(), _source_blocks.end(),
+        [](const auto& blk) { return blk.complete; }));
     check_file_completion();
     if (_complete && _meta.fec_transformer) {
       _meta.fec_transformer->extract_file(_source_blocks);
@@ -330,6 +350,9 @@ auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, 
     if (symbol.id() < block.symbols.size()) {
       auto& sym = block.symbols[symbol.id()];
       sym.queued = false;
+      if (success && !sym.complete) {
+        ++block.completed_symbol_count;
+      }
       sym.complete = success;
     }
     check_source_block_completion(block);

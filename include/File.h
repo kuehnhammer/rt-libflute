@@ -153,6 +153,14 @@ namespace LibFlute {
 
       bool _complete = false;
 
+      // Maintained by check_source_block_completion() — incremented
+      // once each time a SourceBlock.complete bit transitions false→
+      // true. check_file_completion() uses this for an O(1) check
+      // instead of std::all_of-ing _source_blocks (which is hot on
+      // the encoder path: called once per packet × per packet's
+      // symbols).
+      uint32_t _complete_block_count = 0;
+
       uint32_t _nof_source_symbols = 0;
       uint32_t _nof_source_blocks = 0;
       uint32_t _nof_large_source_blocks = 0;

@@ -84,11 +84,18 @@ namespace LibFlute {
   // Symbol::data references either (a) the user file buffer
   // (CompactNoCode encoder + receiver side, regardless of FEC), or
   // (b) RaptorFEC's per-block scratch (Raptor encoder side).
+  // completed_symbol_count is maintained by File::put_symbol /
+  // File::mark_completed: incremented once when a Symbol.complete
+  // bit transitions false→true. The FEC layer uses it to answer
+  // "is this block done?" in O(1) instead of std::all_of-ing the
+  // symbols vector after every packet (which was O(K²) per block
+  // on the encoder side at K=9200).
   struct SourceBlock {
     uint32_t id = 0;
     bool complete = false;
     std::vector<Symbol> symbols;
     uint32_t emit_cursor = 0;
+    uint32_t completed_symbol_count = 0;
   };
 
   struct FecOti {

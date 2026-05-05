@@ -158,9 +158,13 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
 
 bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& srcblk) {
   if (is_encoder) {
-    const bool complete = std::all_of(
-        srcblk.symbols.begin(), srcblk.symbols.end(),
-        [](const auto& s) { return s.complete; });
+    // O(1) — File maintains completed_symbol_count as Symbol.complete
+    // bits transition false→true. Previously this scanned the whole
+    // symbols vector via std::all_of, which is called once per packet
+    // and was therefore O(K_target²) per block (≈80 ms on a 100 MB
+    // K=8000 file).
+    const bool complete =
+        (srcblk.completed_symbol_count == srcblk.symbols.size());
     if (complete) {
       // RaptorFEC owns the per-block scratch in _enc_scratch[sbn]
       // (one allocation per block, set up in create_block). Release
