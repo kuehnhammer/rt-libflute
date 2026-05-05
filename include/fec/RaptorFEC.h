@@ -103,8 +103,39 @@ namespace LibFlute {
       unsigned int G;          // symbols per packet
       unsigned int Z;          // number of source blocks
       unsigned int N;          // sub-blocks per source block
-      unsigned int K;          // symbols in a (regular) source block
       unsigned int Kt;         // total symbols across all blocks
       unsigned int P;          // max payload size
+
+      // RFC 5053 §4.4.1.2 source-block partitioning. Block i carries
+      // KL source symbols when i < ZL, otherwise KS. KL = KS or
+      // KL = KS + 1; the split distributes Kt symbols across Z blocks
+      // as evenly as possible. The previous "K = min(Kt, 8192) +
+      // remainder-in-last-block" partitioning could leave the
+      // trailing block with K < 4 (below bitstem-r10's kJKMinK) for
+      // pathological Kt mod 8192 values.
+      unsigned int KL = 0;
+      unsigned int KS = 0;
+      unsigned int ZL = 0;
+      unsigned int ZS = 0;
+
+      // Per-block K (number of source symbols).
+      unsigned int block_K(unsigned int blockid) const {
+        return (blockid < ZL) ? KL : KS;
+      }
+
+      // Byte offset of source-block `blockid` into the contiguous
+      // source object buffer.
+      unsigned long block_byte_offset(unsigned int blockid) const {
+        if (blockid < ZL) {
+          return static_cast<unsigned long>(blockid) * KL * T;
+        }
+        return static_cast<unsigned long>(ZL) * KL * T +
+               static_cast<unsigned long>(blockid - ZL) * KS * T;
+      }
+
+      // K is retained as an alias for the largest per-block size,
+      // since several existing call sites use it as an upper bound
+      // (e.g. allocate_file_buffer's worst-case sizing).
+      unsigned int K = 0;
   };
 };

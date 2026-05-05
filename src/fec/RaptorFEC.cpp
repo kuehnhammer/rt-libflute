@@ -63,18 +63,30 @@ LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_pa
   spdlog::debug("Z = (unsigned int) ceil(Kt/8192)");
   spdlog::debug("Z = {} = ceil({}/8192)", Z, Kt);
 
-  K = (Kt > 8192) ? 8192 : (unsigned int) Kt;
-  spdlog::debug("K = {}", K);
+  // RFC 5053 §4.4.1.2: split Kt source symbols across Z source blocks
+  // as evenly as possible. Block i in [0, ZL) holds KL symbols;
+  // i in [ZL, Z) holds KS = KL - 1 (or KL if Kt is an exact multiple
+  // of Z). The earlier "K = min(Kt, 8192) + remainder-in-last-block"
+  // partitioning could leave the trailing block with K < kJKMinK = 4
+  // (e.g. Kt = 8195 → 3 symbols in the trailing block; bitstem-r10's
+  // Encoder::Create rejected it).
+  KS = Kt / Z;
+  KL = (Kt % Z == 0) ? KS : (KS + 1);
+  ZL = Kt - Z * KS;
+  ZS = Z - ZL;
+  K  = KL;
+  spdlog::debug("§4.4.1.2 partitioning: Z={} ZL={} ZS={} KL={} KS={}",
+                Z, ZL, ZS, KL, KS);
 
   N = fmin( ceil( ceil((double)Kt/(double)Z) * (double)T/(double)W ), (double)T/(double)Al );
   spdlog::debug("N = fmin( ceil( ceil(Kt/(double)Z) * (double)T/(double)W ) , (double)T/(double)Al )");
   spdlog::debug("N = {} = min( ceil( ceil({}/{}) * {}/{} ) , {}/{} )", N, Kt, Z, T, W, T, Al);
 
-  nof_source_symbols = (unsigned int) Kt;
-  nof_source_blocks = Z;
-  small_source_block_length = (Z * K - nof_source_symbols) * T;
-  nof_large_source_blocks = 0;
-  large_source_block_length = 0;
+  nof_source_symbols        = (unsigned int) Kt;
+  nof_source_blocks         = Z;
+  small_source_block_length = KS * T;
+  large_source_block_length = KL * T;
+  nof_large_source_blocks   = ZL;
 }
 
 LibFlute::RaptorFEC::~RaptorFEC() = default;
@@ -95,12 +107,17 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
     return it->second;
   }
 
-  // Construct a fresh decoder for this source block. The last block
-  // may carry fewer symbols than the regular K (if Kt isn't a clean
-  // multiple of Z*K).
-  const unsigned int nsymbs = (sbn < Z - 1) ? K : (Kt - K * (Z - 1));
-  const unsigned int blocksize =
-      (sbn < Z - 1) ? K * T : (F - K * T * (Z - 1));
+  // Construct a fresh decoder for this source block. Per RFC 5053
+  // §4.4.1.2, blocks 0..ZL-1 have KL source symbols and blocks
+  // ZL..Z-1 have KS = KL or KL-1. Only the very last block of the
+  // entire object may have a partial last source symbol when F isn't
+  // a clean multiple of T.
+  const unsigned int nsymbs = block_K(sbn);
+  const unsigned long byte_off = block_byte_offset(sbn);
+  unsigned long blocksize = static_cast<unsigned long>(nsymbs) * T;
+  if (byte_off + blocksize > F) {
+    blocksize = F - byte_off;
+  }
 
   spdlog::debug("Constructing r10 decoder for SBN {}: K={} blocksize={}",
                 sbn, nsymbs, blocksize);
@@ -212,16 +229,12 @@ bool LibFlute::RaptorFEC::extract_file(std::map<uint32_t, SourceBlock> blocks) {
 }
 
 unsigned int LibFlute::RaptorFEC::target_K(int blockno) {
-  // Always send at least one repair symbol.
-  if (blockno < (int)Z - 1) {
-    int target = (int)(K * surplus_packet_ratio);
-    return (target > (int)K) ? target : K + 1;
-  }
-  // Last block gets special treatment.
-  int remaining_symbs = Kt - K * (Z - 1);
-  return (remaining_symbs + 1 > remaining_symbs * surplus_packet_ratio)
-             ? remaining_symbs + 1
-             : (unsigned int)(remaining_symbs * surplus_packet_ratio);
+  // Per-block source-symbol count from §4.4.1.2 partitioning, plus
+  // at least one repair symbol so the receiver always has a margin
+  // to recover from packet loss.
+  const unsigned int k = block_K(static_cast<unsigned int>(blockno));
+  const unsigned int target = static_cast<unsigned int>(k * surplus_packet_ratio);
+  return (target > k) ? target : k + 1;
 }
 
 LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
@@ -230,10 +243,17 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
   struct SourceBlock source_block;
   source_block.id = blockid;
 
-  const unsigned int nsymbs =
-      (blockid < (int)Z - 1) ? K : (Kt - K * (Z - 1));
-  const unsigned int blocksize =
-      (blockid < (int)Z - 1) ? K * T : (F - K * T * (Z - 1));
+  // Per-block parameters from §4.4.1.2. nsymbs is exact; blocksize
+  // is nsymbs*T except for the very last block when F isn't a clean
+  // multiple of T (the last source symbol then has < T bytes of real
+  // data and is zero-padded below). The caller (create_blocks) has
+  // already advanced `buffer` to block_byte_offset(blockid).
+  const unsigned int  nsymbs    = block_K(static_cast<unsigned int>(blockid));
+  const unsigned long byte_off  = block_byte_offset(static_cast<unsigned int>(blockid));
+  unsigned long       blocksize = static_cast<unsigned long>(nsymbs) * T;
+  if (byte_off + blocksize > F) {
+    blocksize = F - byte_off;
+  }
   // bitstem-r10 requires the encoder's source-symbol span to be
   // exactly nsymbs * T bytes (RFC 5053 §5.4 source-block layout). For
   // every block except possibly the last the file buffer is already
@@ -291,15 +311,18 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
 
   for (unsigned int sbn = 0; sbn < Z; ++sbn) {
     if (!is_encoder) {
-      // Receiver lays out one Symbol per slot in the file buffer at
-      // sbn*K*T + i*T; process_symbol fills these in as packets arrive
-      // and extract_finished_block writes the recovered source block
-      // back over them.
+      // Receiver lays out one Symbol per slot at the §4.4.1.2 block
+      // offset; process_symbol fills these in as packets arrive and
+      // extract_finished_block writes the recovered source block
+      // back over them. The slot offset is block_byte_offset(sbn) +
+      // i*T — using `sbn * K * T` (the old layout) misplaces blocks
+      // beyond ZL when KL ≠ KS.
       LibFlute::SourceBlock block;
-      const unsigned int symbols_to_read = target_K(sbn);
+      const unsigned long blk_off        = block_byte_offset(sbn);
+      const unsigned int  symbols_to_read = target_K(sbn);
       for (unsigned int i = 0; i < symbols_to_read; ++i) {
         block.symbols[i] = Symbol{
-            .data = buffer + sbn * K * T + T * i,
+            .data = buffer + blk_off + static_cast<unsigned long>(i) * T,
             .length = T,
             .complete = false,
         };
@@ -307,7 +330,8 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
       block.id = sbn;
       block_map[sbn] = block;
     } else {
-      block_map[sbn] = create_block(&buffer[*bytes_read], bytes_read, sbn);
+      block_map[sbn] = create_block(buffer + block_byte_offset(sbn),
+                                     bytes_read, sbn);
     }
   }
   return block_map;
@@ -357,14 +381,22 @@ bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {
         "Symbol size T is not a multiple of Al. Invalid configuration from sender");
   }
 
-  nof_source_symbols = ceil((double)F / (double)T);
-  K = (nof_source_symbols > 8192) ? 8192 : nof_source_symbols;
-  Kt = ceil((double)F / (double)T);
+  Kt                 = ceil((double)F / (double)T);
+  nof_source_symbols = (unsigned int) Kt;
 
-  nof_source_blocks = Z;
-  small_source_block_length = (Z * K - nof_source_symbols) * T;
-  nof_large_source_blocks = 0;
-  large_source_block_length = 0;
+  // RFC 5053 §4.4.1.2: same KL/KS/ZL/ZS partitioning as the sender;
+  // both sides MUST agree (Z is on the wire via Scheme-Specific-Info,
+  // so KL/KS/ZL/ZS follow deterministically from Kt/Z).
+  KS = Kt / Z;
+  KL = (Kt % Z == 0) ? KS : (KS + 1);
+  ZL = Kt - Z * KS;
+  ZS = Z - ZL;
+  K  = KL;
+
+  nof_source_blocks         = Z;
+  small_source_block_length = KS * T;
+  large_source_block_length = KL * T;
+  nof_large_source_blocks   = ZL;
 
   return true;
 }

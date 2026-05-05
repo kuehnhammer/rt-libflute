@@ -195,7 +195,17 @@ INSTANTIATE_TEST_SUITE_P(
         // the encoder when constructing the OTI.
         std::make_tuple<std::size_t, unsigned>(4096U,    1500U),
         std::make_tuple<std::size_t, unsigned>(65536U,   1500U),
-        std::make_tuple<std::size_t, unsigned>(200000U,  1500U)
+        std::make_tuple<std::size_t, unsigned>(200000U,  1500U),
+        // RFC 5053 §4.4.1.2 partitioning regression. F=11,931,920 with
+        // mtu=1500 yields T=1456 and Kt=8195. Under the old fixed-K
+        // partitioning (K=min(Kt,8192) + remainder) the last block
+        // carries 3 symbols, which falls below bitstem-r10's
+        // kJKMinK=4 and makes Encoder::Create return nullopt → the
+        // entire encoder.send() fails. With proper §4.4.1.2
+        // KL/KS/ZL/ZS distribution the symbols are split evenly
+        // (KL=4098, KS=4097, ZL=1) so both blocks are well above
+        // the codec's K-floor.
+        std::make_tuple<std::size_t, unsigned>(11931920U, 1500U)
         ),
     [](const ::testing::TestParamInfo<RaptorRoundTrip::ParamType>& info) {
         return "F" + std::to_string(std::get<0>(info.param)) + "_mtu" +

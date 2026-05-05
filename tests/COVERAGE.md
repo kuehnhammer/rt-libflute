@@ -237,6 +237,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | 5 | RaptorFEC encoder passed a non-`K*T`-sized source span to bitstem-r10's Encoder::Create when F was not a multiple of T; the codec rejected it | RFC 5053 §4.2 (zero-pad last source symbol to T) | `27b6866` |
 | 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | `27b6866` |
 | 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | `36bbf17` |
+| 7 | RaptorFEC used `K = min(Kt, 8192) + remainder-in-last-block` partitioning; for Kt where Kt mod 8192 < 4 the last block's K fell below `kJKMinK = 4` and `bitstem::r10::Encoder::Create` rejected it (e.g. F = 11.4 MB at mtu=1500 → Kt=8195 → last block K=3, send fails). Replaced with proper §4.4.1.2 KL/KS/ZL/ZS distribution. | RFC 5053 §4.4.1.2 | (round-7 commit) |
 
 ## Out of scope (future rounds)
 
@@ -253,7 +254,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 
 | Area | Spec | Notes |
 |------|------|-------|
-| Proper RFC 5053 §4.4.1.2 source-block partitioning (K_L / K_S split, Z_L / Z_S blocks) | RFC 5053 §4.4.1.2 | Current code uses fixed-K-with-remainder-in-last-block. Correctness-equivalent for round-trip but not §4.4.1.2-compliant; affects how K is distributed across blocks for large files. |
+| Proper RFC 5053 §4.4.1.2 source-block partitioning (K_L / K_S split, Z_L / Z_S blocks) | RFC 5053 §4.4.1.2 | DONE in round 7 — see fix in `src/fec/RaptorFEC.cpp` and the `F11931920_mtu1500` regression test in `tests/unit/integration_test.cpp`. |
 | `Encoder::send` 16-bit TSI/TOI cap | RFC 5651 §5.1 (TSI/TOI may be up to 48 bits) | Encoder/AlcPacket producer hardcodes `half_word_flag=1, toi_flag=0`; supporting wider IDs needs producer changes. |
 | Raptor decoder's repair tolerance | RFC 5053 / lib/raptor | Round-5 lossy tests deliberately stay within FEC budget; characterising the codec's actual loss limit and adding a "loss right at the edge" stress test would tighten coverage. |
 | Decoder/Encoder reception statistics | (operational, not RFC-required) | DONE in round 6 — see EncoderStats / DecoderStats and tests/unit/stats_test.cpp. |
