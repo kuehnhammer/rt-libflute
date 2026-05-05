@@ -17,9 +17,6 @@
 #include <stdint.h>
 #include <map>
 #include "tinyxml2.h"
-#ifdef RAPTOR_ENABLED
-#include "raptor.h"
-#endif
 
 #pragma once
 /** \mainpage LibFlute - ALC/FLUTE library

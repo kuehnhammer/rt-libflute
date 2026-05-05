@@ -1,0 +1,3 @@
+[submodule "lib/raptor"]
+	path = lib/raptor
+	url = git@git.bitstem.com:bitstem/raptor10.git

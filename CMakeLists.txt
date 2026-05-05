@@ -62,7 +62,6 @@ endif()
 include_directories(
     "${PROJECT_BINARY_DIR}"
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/raptor
 
     SYSTEM
     ${PROJECT_SOURCE_DIR}/utils
@@ -80,23 +79,15 @@ configure_file("include/Version.h.in" "Version.h")
 set(CMAKE_CXX_CLANG_TIDY clang-tidy)
 
 if(ENABLE_RAPTOR)
-  message(STATUS "Compiling raptor library for Raptor FEC support. To disable support build with -DENABLE_RAPTOR=OFF")
-  add_library(raptor STATIC)
-  target_sources(raptor
-    PRIVATE
-      ${PROJECT_SOURCE_DIR}/lib/raptor/bipartite.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/decoder.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/encoder.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/galois.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/gaussian.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/pivoting.c
-      ${PROJECT_SOURCE_DIR}/lib/raptor/random.c
-    PUBLIC
-      ${PROJECT_SOURCE_DIR}/lib/raptor/raptor.h
-  )
-  target_link_libraries(raptor LINK_PUBLIC m)
+  message(STATUS "Compiling bitstem-r10 (lib/raptor/) for Raptor FEC support. To disable support build with -DENABLE_RAPTOR=OFF")
+  # bitstem-r10 is a CMake-aware C++ submodule with its own targets.
+  # Suppress its tests/benchmarks when embedded -- we only need the
+  # `r10` static library.
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(R10_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/lib/raptor)
 else()
-  message(STATUS "Skipping raptor library for Raptor FEC support. To enable support build with -DENABLE_RAPTOR=ON")
+  message(STATUS "Skipping bitstem-r10 build. To enable Raptor FEC support build with -DENABLE_RAPTOR=ON")
 endif()
 
 # Core: parser + ReceiverBase + File assembly + FDT + DirectReceiver.
@@ -143,14 +134,16 @@ target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/include/)
 
 if(ENABLE_RAPTOR)
   add_compile_definitions(RAPTOR_ENABLED)
-  target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/lib/raptor/)
   target_sources(flute
     PRIVATE
 	  src/fec/RaptorFEC.cpp
 	PUBLIC
 	  include/fec/RaptorFEC.h
   )
-  target_link_libraries(flute LINK_PUBLIC raptor)
+  # bitstem-r10's own CMakeLists exports the include path on the `r10`
+  # target (target_include_directories(r10 PUBLIC include)), so linking
+  # is enough.
+  target_link_libraries(flute LINK_PUBLIC r10)
 endif()
 
 target_link_libraries(flute
