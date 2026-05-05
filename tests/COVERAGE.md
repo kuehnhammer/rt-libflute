@@ -236,7 +236,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | `f2c9a81` |
 | 5 | RaptorFEC encoder passed a non-`K*T`-sized source span to bitstem-r10's Encoder::Create when F was not a multiple of T; the codec rejected it | RFC 5053 §4.2 (zero-pad last source symbol to T) | `27b6866` |
 | 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | `27b6866` |
-| 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | (round-6 commit) |
+| 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | `36bbf17` |
 
 ## Out of scope (future rounds)
 
