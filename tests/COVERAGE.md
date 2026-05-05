@@ -237,7 +237,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | 5 | RaptorFEC encoder passed a non-`K*T`-sized source span to bitstem-r10's Encoder::Create when F was not a multiple of T; the codec rejected it | RFC 5053 §4.2 (zero-pad last source symbol to T) | `27b6866` |
 | 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | `27b6866` |
 | 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | `36bbf17` |
-| 7 | RaptorFEC used `K = min(Kt, 8192) + remainder-in-last-block` partitioning; for Kt where Kt mod 8192 < 4 the last block's K fell below `kJKMinK = 4` and `bitstem::r10::Encoder::Create` rejected it (e.g. F = 11.4 MB at mtu=1500 → Kt=8195 → last block K=3, send fails). Replaced with proper §4.4.1.2 KL/KS/ZL/ZS distribution. | RFC 5053 §4.4.1.2 | (round-7 commit) |
+| 7 | RaptorFEC used `K = min(Kt, 8192) + remainder-in-last-block` partitioning; for Kt where Kt mod 8192 < 4 the last block's K fell below `kJKMinK = 4` and `bitstem::r10::Encoder::Create` rejected it (e.g. F = 11.4 MB at mtu=1500 → Kt=8195 → last block K=3, send fails). Replaced with proper §4.4.1.2 KL/KS/ZL/ZS distribution. | RFC 5053 §4.4.1.2 | `fd09076` |
 
 ## Out of scope (future rounds)
 
