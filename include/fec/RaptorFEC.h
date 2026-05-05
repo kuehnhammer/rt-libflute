@@ -15,6 +15,7 @@
 //
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -82,6 +83,19 @@ namespace LibFlute {
       // nulled in check_source_block_completion). Peak memory is
       // O(K_max × T) instead of O(Z × K × T).
       std::vector<char> _enc_scratch;
+      // Cached per-K bitstem-r10 encoder, reused across blocks.
+      // Keeping the Encoder alive across blocks means the
+      // intermediate-symbols buffer (~12 MB at K=8000, T=1424) is
+      // allocated once per RaptorFEC lifetime instead of once per
+      // block, killing the kernel page-fault overhead that dominated
+      // ~17 % of Encoder::Create cycles. Per RFC 5053 §4.4.1.2 a
+      // file has at most 2 distinct K values (KL and KL-1), so a
+      // 2-slot map is sufficient.
+      struct EncSlot {
+        std::uint16_t K = 0;
+        std::optional<bitstem::r10::fast::Encoder> enc;
+      };
+      std::array<EncSlot, 2> _enc_slots;
       // SBN currently materialised in _enc_scratch, or -1 if scratch
       // is empty. Used as a no-op guard if prepare_for_emit() is
       // re-entered for the same block (shouldn't happen with the

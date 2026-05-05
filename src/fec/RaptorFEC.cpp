@@ -357,24 +357,52 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
   spdlog::debug("Filling r10 scratch for SBN {}: K={} blocksize={} (padded={}) target_K={}",
                 blockid, nsymbs, blocksize, padded_size, symbols_to_emit);
 
-  auto enc = bitstem::r10::fast::Encoder::Create(
-      static_cast<std::uint16_t>(nsymbs),
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte*>(_enc_scratch.data()),
-          padded_size),
-      T);
-  if (!enc.has_value()) {
-    spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
-                  blockid, nsymbs);
-    throw std::runtime_error("Error creating r10 encoder");
+  // Per RFC 5053 §4.4.1.2 a file has at most 2 distinct K values
+  // (KL and KL-1). Cache one Encoder per K — across both blocks of
+  // a multi-block file AND across all RaptorFEC instances of a
+  // session if the K stays stable, the 12 MB intermediate-symbols
+  // buffer is allocated once instead of per block. Per the
+  // r10_bench encode-reset measurement at K=8000 / T=1424, Reset
+  // is 13.9 ms vs Create's 22.6 ms — a 39 % per-call saving.
+  EncSlot* slot_ptr = nullptr;
+  for (auto& slot : _enc_slots) {
+    if (slot.enc.has_value() && slot.K == nsymbs) {
+      slot_ptr = &slot;
+      break;
+    }
   }
+  if (slot_ptr == nullptr) {
+    for (auto& slot : _enc_slots) {
+      if (!slot.enc.has_value()) {
+        auto enc = bitstem::r10::fast::Encoder::Create(
+            static_cast<std::uint16_t>(nsymbs), T);
+        if (!enc.has_value()) {
+          spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
+                        blockid, nsymbs);
+          throw std::runtime_error("Error creating r10 encoder");
+        }
+        slot.K   = static_cast<std::uint16_t>(nsymbs);
+        slot.enc = std::move(*enc);
+        slot_ptr = &slot;
+        break;
+      }
+    }
+    if (slot_ptr == nullptr) {
+      throw std::runtime_error(
+          "RaptorFEC: more than 2 distinct K values requested for one file");
+    }
+  }
+  auto& enc = *slot_ptr->enc;
+  enc.Reset(std::span<const std::byte>(
+      reinterpret_cast<const std::byte*>(_enc_scratch.data()),
+      padded_size));
 
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
     char* slot = _enc_scratch.data() + esi * T;
     if (esi >= nsymbs) {
-      enc->EncodeSymbol(esi,
-                        std::span<std::byte>(
-                            reinterpret_cast<std::byte*>(slot), T));
+      enc.EncodeSymbol(esi,
+                       std::span<std::byte>(
+                           reinterpret_cast<std::byte*>(slot), T));
     }
     // Source ESIs (esi < nsymbs) reuse the bytes already memcpy'd in
     // — r10's LT for esi<K reproduces the source symbol verbatim.
