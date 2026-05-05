@@ -234,15 +234,30 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
       (blockid < (int)Z - 1) ? K : (Kt - K * (Z - 1));
   const unsigned int blocksize =
       (blockid < (int)Z - 1) ? K * T : (F - K * T * (Z - 1));
+  // bitstem-r10 requires the encoder's source-symbol span to be
+  // exactly nsymbs * T bytes (RFC 5053 §5.4 source-block layout). For
+  // every block except possibly the last the file buffer is already
+  // a multiple of T, so no copy is needed. For the trailing block
+  // when F is not a multiple of T, pad with zeros into a temporary
+  // buffer; the receiver also operates on a K-padded buffer and
+  // truncates to F when the file is handed back.
+  const unsigned int padded_size = nsymbs * T;
+  std::vector<std::byte> padded;
+  std::span<const std::byte> source_span;
+  if (blocksize == padded_size) {
+    source_span = std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(buffer), blocksize);
+  } else {
+    padded.assign(padded_size, std::byte{0});
+    std::memcpy(padded.data(), buffer, blocksize);
+    source_span = std::span<const std::byte>(padded.data(), padded_size);
+  }
 
-  spdlog::debug("Constructing r10 encoder for SBN {}: K={} blocksize={}",
-                blockid, nsymbs, blocksize);
+  spdlog::debug("Constructing r10 encoder for SBN {}: K={} blocksize={} (padded={})",
+                blockid, nsymbs, blocksize, padded_size);
 
   auto enc = bitstem::r10::fast::Encoder::Create(
-      static_cast<std::uint16_t>(nsymbs),
-      std::span<const std::byte>(reinterpret_cast<const std::byte*>(buffer),
-                                  blocksize),
-      T);
+      static_cast<std::uint16_t>(nsymbs), source_span, T);
   if (!enc.has_value()) {
     spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
                   blockid, nsymbs);
@@ -357,10 +372,18 @@ bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {
 bool LibFlute::RaptorFEC::add_fdt_info(tinyxml2::XMLElement *file) {
   file->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned) FecScheme::Raptor);
   file->SetAttribute("FEC-OTI-Encoding-Symbol-Length", T);
-  file->SetAttribute("FEC-OTI-Symbol-Alignment-Parameter", Al);
-  file->SetAttribute("FEC-OTI-Number-Of-Source-Blocks", Z);
-  file->SetAttribute("FEC-OTI-Number-Of-Sub-Blocks", N);
-  file->SetAttribute("FEC-OTI-Symbol-Alignment-Parameter", Al);
+  file->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", K);
+
+  // RFC 6726 §3.4.2 + RFC 5053 §3.2: the per-FEC-scheme parameters
+  // ride in a single FEC-OTI-Scheme-Specific-Info attribute as
+  // base64. Layout for Raptor: Z(2 bytes BE) + N(1) + Al(1) = 4 bytes.
+  std::array<unsigned char, 4> ssi{};
+  ssi[0] = static_cast<unsigned char>((Z >> 8) & 0xFFU);
+  ssi[1] = static_cast<unsigned char>(Z & 0xFFU);
+  ssi[2] = static_cast<unsigned char>(N);
+  ssi[3] = static_cast<unsigned char>(Al);
+  std::string ssi_b64 = base64_encode({ssi.begin(), ssi.end()}, ssi.size());
+  file->SetAttribute("FEC-OTI-Scheme-Specific-Info", ssi_b64.c_str());
 
   is_encoder = true;
   return true;

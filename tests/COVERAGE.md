@@ -128,14 +128,39 @@ remember).
 | `CalculateMd5.ReturnsDigestLengthOnValidInput` | (libflute internal contract) | active |
 | `FileConstruction.RejectsZeroLengthDataBuffer` | RFC 6726 §3.4.2 (Content-MD5 must be correct when emitted) | active (round-2 fix) |
 
-### `tests/unit/direct_receiver_test.cpp` — embedder entry path
+### `tests/unit/decoder_test.cpp` — Decoder consumer entry path
+
+(File renamed from `direct_receiver_test.cpp` in round 5 alongside the
+DirectReceiver→Decoder API rename.)
 
 | Test | Spec | State |
 |------|------|-------|
-| `RejectsPacketsWithMismatchedTsi` | RFC 5651 §3.1 (session TSI filter) | active |
-| `FdtPacketWithToi0AndExtFdtTriggersFdtParse` | RFC 6726 §3.4.1 + App. A | active |
-| `FilePacketRoutedToFileByToi` | RFC 6726 App. A step 4 | active |
-| `CompletionCallbackFiresWhenFileFullyReceived` | RFC 6726 App. A step 7 | active |
+| `Decoder.RejectsPacketsWithMismatchedTsi` | RFC 5651 §3.1 (session TSI filter) | active |
+| `Decoder.FdtPacketWithToi0AndExtFdtTriggersFdtParse` | RFC 6726 §3.4.1 + App. A | active |
+| `Decoder.FilePacketRoutedToFileByToi` | RFC 6726 App. A step 4 | active |
+| `Decoder.CompletionCallbackFiresWhenFileFullyReceived` | RFC 6726 App. A step 7 | active |
+
+### `tests/unit/integration_test.cpp` — TX→RX round-trip
+
+End-to-end. Encoder emits ALC packet bytes via its PacketCallback;
+the test pipes them straight into Decoder.feed_packet and asserts the
+received File buffer equals the sent buffer. No sockets, no asio.
+
+| Test | Spec | State |
+|------|------|-------|
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F1_mtu1500` | RFC 5052 §9.1 (tiny F < T) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F64_mtu1500` | RFC 5052 §9.1 (small F < T) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F1456_mtu1500` | RFC 5052 §9.1 (single full symbol) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F1457_mtu1500` | RFC 5052 §9.1 (T+1 partial residue) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F8192_mtu576` | RFC 5052 §9.1 (small MTU multi-block) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F65536_mtu1500` | RFC 5052 §9.1 (64 KiB) | active (round-5) |
+| `CompactNoCodeRoundTrip.FileBytesMatchAfterTransport/F262144_mtu1500` | RFC 5052 §9.1 (256 KiB deep multi-block) | active (round-5) |
+| `RaptorRoundTrip.FileBytesMatchAfterTransport/F4096_mtu1500` | RFC 5053 + lib/raptor (small block) | active (round-5, gated on RAPTOR_ENABLED) |
+| `RaptorRoundTrip.FileBytesMatchAfterTransport/F65536_mtu1500` | RFC 5053 + lib/raptor | active (round-5, gated on RAPTOR_ENABLED) |
+| `RaptorRoundTrip.FileBytesMatchAfterTransport/F200000_mtu1500` | RFC 5053 + lib/raptor (multi-block) | active (round-5, gated on RAPTOR_ENABLED) |
+| `RaptorLossyRoundTrip.FileBytesMatchAfterRaptorRepairsLoss/F65536_mtu1500_drop1in20` | RFC 5053 inactivation decoding | active (round-5, gated on RAPTOR_ENABLED) |
+| `RaptorLossyRoundTrip.FileBytesMatchAfterRaptorRepairsLoss/F200000_mtu1500_drop1in10` | RFC 5053 inactivation decoding | active (round-5, gated on RAPTOR_ENABLED) |
+| `RaptorLossyRoundTrip.FileBytesMatchAfterRaptorRepairsLoss/F200000_mtu1500_drop1in20` | RFC 5053 inactivation decoding | active (round-5, gated on RAPTOR_ENABLED) |
 
 ### `tests/unit/fdt_lifecycle_test.cpp` — RFC 6726 §3.3 FDT updates
 
@@ -172,19 +197,28 @@ remember).
 | 4 | ReceiverBase linear `>` comparison didn't handle 20-bit instance-ID wraparound | RFC 6726 §3.3 + RFC 1982 | `f2c9a81` |
 | 4 | Receiver never checked FDT-Instance Expires; expired FDTs were applied indefinitely | RFC 6726 §3.3 Expires | `f2c9a81` |
 | 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | `f2c9a81` |
+| 5 | RaptorFEC encoder passed a non-`K*T`-sized source span to bitstem-r10's Encoder::Create when F was not a multiple of T; the codec rejected it | RFC 5053 §4.2 (zero-pad last source symbol to T) | (round-5 commit) |
+| 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | (round-5 commit) |
 
 ## Out of scope (future rounds)
 
 | Area | Why out of scope |
 |------|------------------|
-| TOI=0 / TOI-reuse collision in Transmitter | Boost.asio test rig needed; only triggers after >65k in-flight files |
-| Raptor FEC end-to-end through FLUTE | `lib/raptor` has its own ~245-test suite; this layer is glue |
 | `mbms2005:Group` / `MBMS-Session-Identity` | Rel-6 group subscription not used by current embedder |
 | `mbms2015:IndependentUnitPositions` | Specialised incremental FEC repair |
 | XSD-validation pass on serialised FDT | Would need libxml2 for schema validation; structural tests cover drift adequately |
-| TSI-scope multi-source filtering | Needs source-IP awareness which DirectReceiver doesn't expose |
+| TSI-scope multi-source filtering | Needs source-IP awareness which Decoder doesn't expose |
 | Default-namespace (`xmlns="..."` without prefix) handling in FDT parser | All MBMS FDT-Instance children are in the no-namespace bucket by spec; default-ns rebinding is not used in TS 26.346 examples |
 | Mid-element xmlns redeclaration | Pathological; not used in MBMS FDTs in practice |
+
+### Round-6 candidates
+
+| Area | Spec | Notes |
+|------|------|-------|
+| Proper RFC 5053 §4.4.1.2 source-block partitioning (K_L / K_S split, Z_L / Z_S blocks) | RFC 5053 §4.4.1.2 | Current code uses fixed-K-with-remainder-in-last-block. Correctness-equivalent for round-trip but not §4.4.1.2-compliant; affects how K is distributed across blocks for large files. |
+| `Encoder::send` 16-bit TSI/TOI cap | RFC 5651 §5.1 (TSI/TOI may be up to 48 bits) | Encoder/AlcPacket producer hardcodes `half_word_flag=1, toi_flag=0`; supporting wider IDs needs producer changes. |
+| Raptor decoder's repair tolerance | RFC 5053 / lib/raptor | Round-5 lossy tests deliberately stay within FEC budget; characterising the codec's actual loss limit and adding a "loss right at the edge" stress test would tighten coverage. |
+| Decoder/Encoder reception statistics | (operational, not RFC-required) | Surface counters for systematic-vs-repair packet RX, total bytes, files completed/dropped, FEC-recovery success/failure, etc. Useful for 5gr / core embedders to expose to operators. Add a `stats()` accessor on Decoder + matching tests. |
 
 ## Test-writing rules
 

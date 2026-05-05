@@ -1,236 +1,208 @@
 // libflute - FLUTE/ALC library
 //
-// Copyright (C) 2021 Klaus Kühnhammer (Österreichische Rundfunksender GmbH & Co KG)
+// Demo transmitter: opens a plain POSIX UDP socket and pumps packets
+// from a LibFlute::Encoder to a multicast (or unicast) destination.
+// Network handling lives entirely here in the example, not in the
+// library — this is the pattern consumers should mirror.
 //
-// Licensed under the License terms and conditions for use, reproduction, and
-// distribution of 5G-MAG software (the “License”).  You may not use this file
-// except in compliance with the License.  You may obtain a copy of the License at
-// https://www.5g-mag.com/reference-tools.  Unless required by applicable law or
-// agreed to in writing, software distributed under the License is distributed on
-// an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied.
-// 
-// See the License for the specific language governing permissions and limitations
-// under the License.
-//
+#include <argp.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <syslog.h>
+#include <unistd.h>
 
-#include <argp.h>                          // for argp_state, argp_parse
-#include <fcntl.h>                         // for open, O_RDONLY
-#include <spdlog/common.h>                 // for level_enum
-#include <cstdint>                        // for uint32_t
-#include <sys/mman.h>                      // for mmap, munmap, MAP_PRIVATE
-#include <sys/stat.h>                      // for stat, fstat
-#include <syslog.h>                        // for LOG_CONS, LOG_PERROR, LOG_PID
-#include <unistd.h>                        // for close
-#include <boost/asio.hpp>
-#include <cstdio>                          // for FILE, fprintf, size_t
-#include <cstdlib>                         // for strtoul
-#include <exception>                       // for exception
-#include <string>                          // for allocator, to_string, string
-#include <vector>                          // for vector
-#include "Transmitter.h"                   // for Transmitter
-#include "Version.h"                       // for VERSION_MAJOR, VERSION_MINOR
-#include "flute_types.h"                   // for FecScheme
-#include "spdlog/sinks/syslog_sink.h"      // for syslog_logger_mt
-#include "spdlog/spdlog.h"                 // for error, info, set_default_l...
-namespace libconfig { class Config; }
-namespace libconfig { class FileIOException; }
-namespace libconfig { class ParseException; }
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
 
-using libconfig::Config;
-using libconfig::FileIOException;
-using libconfig::ParseException;
+#include "Encoder.h"
+#include "Version.h"
+#include "flute_types.h"
+#include "spdlog/sinks/syslog_sink.h"
+#include "spdlog/spdlog.h"
 
-static void print_version(FILE *stream, struct argp_state *state);
-void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
-const char *argp_program_bug_address = "5G-MAG Reference Tools <reference-tools@5g-mag.com>";
-static char doc[] = "FLUTE/ALC transmitter demo";  // NOLINT
+namespace {
 
-static struct argp_option options[] = {  // NOLINT
-    {"target", 'm', "IP", 0, "Target multicast address (default: 238.1.1.95)", 0},
-    {"fec", 'f', "FEC Scheme", 0, "Choose a scheme for Forward Error Correction. Compact No Code = 0, Raptor = 1 (default is 0)", 0},
-    {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
-    {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
-    {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit (kbps), 0 = no limit, default: 1000 (1 Mbps)", 0},
-    {"log-level", 'l', "LEVEL", 0,
-     "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
-     "critical, 6 = none. Default: 2.",
-     0},
-    {nullptr, 0, nullptr, 0, nullptr, 0}};
-
-/**
- * Holds all options passed on the command line
- */
-struct ft_arguments {
-  const char *mcast_target = {};
+struct Args {
+  const char* mcast_target = "238.1.1.95";
   unsigned short mcast_port = 40085;
   unsigned short mtu = 1500;
-  uint32_t rate_limit = 1000;
-  unsigned log_level = 2;        /**< log level */
-  unsigned fec = 0;        /**< log level */
-  char **files;
+  std::uint32_t rate_limit_kbps = 1000;
+  unsigned log_level = 2;
+  unsigned fec = 0;
+  std::uint64_t tsi = 16;
+  char** files = nullptr;
 };
 
-/**
- * Parses the command line options into the arguments struct.
- */
-static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
-  auto arguments = static_cast<struct ft_arguments *>(state->input);
+argp_option options[] = {
+    {"target", 'm', "IP", 0, "Target multicast address (default: 238.1.1.95)", 0},
+    {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
+    {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
+    {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit in kbps; 0 = unlimited (default: 1000)", 0},
+    {"fec", 'f', "FEC", 0, "FEC scheme: 0 = Compact No-Code, 1 = Raptor (default: 0)", 0},
+    {"tsi", 's', "TSI", 0, "Session TSI (default: 16)", 0},
+    {"log-level", 'l', "LEVEL", 0, "Log verbosity 0..6 (default: 2)", 0},
+    {nullptr, 0, nullptr, 0, nullptr, 0},
+};
+
+error_t parse_opt(int key, char* arg, argp_state* state) {
+  auto* a = static_cast<Args*>(state->input);
   switch (key) {
-    case 'm':
-      arguments->mcast_target = arg;
-      break;
-    case 'p':
-      arguments->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10));
-      break;
-    case 't':
-      arguments->mtu = static_cast<unsigned short>(strtoul(arg, nullptr, 10));
-      break;
-    case 'r':
-      arguments->rate_limit = static_cast<uint32_t>(strtoul(arg, nullptr, 10));
-      break;
-    case 'l':
-      arguments->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10));
-      break;
-    case 'f':
-      arguments->fec = static_cast<unsigned>(strtoul(arg, nullptr, 10));
-      if ( (arguments->fec | 1) != 1 ) {
-        spdlog::error("Invalid FEC scheme ! Please pick either 0 (Compact No Code) or 1 (Raptor)");
-        return ARGP_ERR_UNKNOWN;
-      }
-      break;
-    case ARGP_KEY_NO_ARGS:
-      argp_usage (state);
+    case 'm': a->mcast_target = arg; break;
+    case 'p': a->mcast_port    = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
+    case 't': a->mtu           = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
+    case 'r': a->rate_limit_kbps = static_cast<std::uint32_t>(strtoul(arg, nullptr, 10)); break;
+    case 'f': a->fec           = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
+    case 's': a->tsi           = strtoull(arg, nullptr, 10); break;
+    case 'l': a->log_level     = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
+    case ARGP_KEY_NO_ARGS: argp_usage(state); break;
     case ARGP_KEY_ARG:
-      arguments->files = &state->argv[state->next-1];
+      a->files = &state->argv[state->next - 1];
       state->next = state->argc;
       break;
-    default:
-      return ARGP_ERR_UNKNOWN;
+    default: return ARGP_ERR_UNKNOWN;
   }
   return 0;
 }
 
-static char args_doc[] = "[FILE...]"; //NOLINT
-static struct argp argp = {options, parse_opt, args_doc, doc,
-                           nullptr, nullptr,   nullptr};
-
-/**
- * Print the program version in MAJOR.MINOR.PATCH format.
- */
-void print_version(FILE *stream, struct argp_state * /*state*/) {
-  fprintf(stream, "%s.%s.%s\n", std::to_string(VERSION_MAJOR).c_str(),
-          std::to_string(VERSION_MINOR).c_str(),
-          std::to_string(VERSION_PATCH).c_str());
+void print_version(FILE* stream, argp_state*) {
+  std::fprintf(stream, "%d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 }
 
-/**
- *  Main entry point for the program.
- *  
- * @param argc  Command line agument count
- * @param argv  Command line arguments
- * @return 0 on clean exit, -1 on failure
- */
-auto main(int argc, char **argv) -> int {
-  struct ft_arguments arguments;
-  /* Default values */
-  arguments.mcast_target = "238.1.1.95";
+}  // namespace
 
-  argp_parse(&argp, argc, argv, 0, nullptr, &arguments);
-  
-  // Set up logging
-  std::string ident = "flute-transmitter";
-  auto syslog_logger = spdlog::syslog_logger_mt("syslog", ident, LOG_PID | LOG_PERROR | LOG_CONS );
+void (*argp_program_version_hook)(FILE*, argp_state*) = print_version;
 
-  spdlog::set_level(
-      static_cast<spdlog::level::level_enum>(arguments.log_level));
-  spdlog::set_pattern("[%H:%M:%S.%f %z] [%^%l%$] [thr %t] %v");
+int main(int argc, char** argv) {
+  Args args;
+  argp argp_spec = {options, parse_opt, "[FILE...]",
+                     "FLUTE/ALC transmitter demo (plain POSIX UDP).",
+                     nullptr, nullptr, nullptr};
+  argp_parse(&argp_spec, argc, argv, 0, nullptr, &args);
 
-  spdlog::set_default_logger(syslog_logger);
-  spdlog::info("FLUTE transmitter demo starting up");
+  auto syslog_sink = spdlog::syslog_logger_mt(
+      "syslog", "flute-transmitter", LOG_PID | LOG_PERROR | LOG_CONS);
+  spdlog::set_default_logger(syslog_sink);
+  spdlog::set_level(static_cast<spdlog::level::level_enum>(args.log_level));
+  spdlog::set_pattern("[%H:%M:%S.%f] [%^%l%$] %v");
 
-  try {
-    // We're responsible for buffer management, so create a vector of structs that
-    // are going to hold the data buffers
-    struct FsFile {
-      std::string location;
-      char* buffer;
-      size_t len;
-      uint32_t toi;
-    };
-    std::vector<FsFile> files;
-
-    // read the file contents into the buffers
-    for (int j = 0; arguments.files[j]; j++) {
-      struct stat sb;
-      int fd;
-      fd = open(arguments.files[j], O_RDONLY);
-      if (fd == -1) {
-        spdlog::error("Couldnt open file {}",arguments.files[j]);
-        continue;
-      } 
-      if (fstat(fd, &sb) == -1){ // To obtain file size
-        spdlog::error("fstat() call for file {} failed",arguments.files[j]);
-        close(fd);
-        continue;
-      }
-      if (sb.st_size <= 0) {
-        close(fd);
-        continue;
-      }
-      char* buffer = (char*) mmap(nullptr, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  // Mmap each input file. The Encoder takes a non-owning pointer; the
+  // mmap stays alive until completion-callback frees it.
+  struct Mapped {
+    std::string path;
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    std::uint16_t toi = 0;
+  };
+  std::vector<Mapped> files;
+  for (int j = 0; args.files && args.files[j]; ++j) {
+    int fd = open(args.files[j], O_RDONLY);
+    if (fd < 0) {
+      spdlog::error("open({}): {}", args.files[j], std::strerror(errno));
+      continue;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size <= 0) {
       close(fd);
-      if ( (long) buffer <= 0) {
-        spdlog::error("mmap() failed for file {}",arguments.files[j]);
-        continue;
-      }
-      files.push_back(FsFile{ arguments.files[j], buffer, (size_t) sb.st_size});
+      continue;
     }
-
-    // Create a Boost io_service
-    boost::asio::io_service io;
-
-    // Construct the transmitter class
-    LibFlute::Transmitter transmitter(
-        arguments.mcast_target,
-        (short)arguments.mcast_port,
-        16,
-        arguments.mtu,
-        arguments.rate_limit,
-        LibFlute::FecScheme(arguments.fec),
-        io);
-
-    // Register a completion callback
-    transmitter.register_completion_callback(
-        [&files](uint32_t toi) {
-        for (auto& file : files) {
-          if (file.toi == toi) { 
-            spdlog::info("{} (TOI {}) has been transmitted", file.location,file.toi);
-            munmap(file.buffer,file.len);
-          }
-        }
-        });
-
-    // Queue all the files 
-    for (auto& file : files) {
-      file.toi = transmitter.send( file.location,
-          "application/octet-stream",
-          transmitter.seconds_since_epoch() + 60, // 1 minute from now
-          file.buffer,
-          file.len
-          );
-      if (file.toi > 0) {
-        spdlog::info("Queued {} ({} bytes) for transmission, TOI is {}",
-          file.location, file.len, file.toi);
-      }
+    void* p = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) {
+      spdlog::error("mmap({}): {}", args.files[j], std::strerror(errno));
+      continue;
     }
-
-    // Start the io_service, and thus sending data
-    io.run();
-  } catch (std::exception ex ) {
-    spdlog::error("Exiting on unhandled exception: %s", ex.what());
+    files.push_back({args.files[j], static_cast<char*>(p),
+                      static_cast<std::size_t>(st.st_size), 0});
+  }
+  if (files.empty()) {
+    spdlog::error("no usable input files");
+    return 1;
   }
 
-exit:
+  // Open a plain UDP socket. Multicast TTL 8, loopback enabled so a
+  // local receiver on the same host can pick the packets up.
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock < 0) {
+    spdlog::error("socket: {}", std::strerror(errno));
+    return 1;
+  }
+  unsigned char ttl = 8;
+  setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+  unsigned char loop = 1;
+  setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+
+  sockaddr_in dst{};
+  dst.sin_family = AF_INET;
+  dst.sin_port   = htons(args.mcast_port);
+  if (inet_pton(AF_INET, args.mcast_target, &dst.sin_addr) != 1) {
+    spdlog::error("invalid target address: {}", args.mcast_target);
+    close(sock);
+    return 1;
+  }
+
+  // Encoder: PacketCallback dispatches via sendto. Returns true on
+  // successful dispatch so the encoder marks symbols transmitted.
+  LibFlute::Encoder encoder(
+      args.tsi, args.mtu, args.rate_limit_kbps,
+      [sock, &dst](std::span<const std::uint8_t> bytes) -> bool {
+        ssize_t n = sendto(sock, bytes.data(), bytes.size(), 0,
+                            reinterpret_cast<const sockaddr*>(&dst),
+                            sizeof(dst));
+        if (n < 0) {
+          spdlog::warn("sendto: {}", std::strerror(errno));
+          return false;
+        }
+        return true;
+      });
+
+  encoder.register_completion_callback([&](std::uint32_t toi) {
+    for (auto& f : files) {
+      if (f.toi == toi) {
+        spdlog::info("transmitted {} (TOI {})", f.path, toi);
+        munmap(f.buffer, f.length);
+        f.buffer = nullptr;
+      }
+    }
+  });
+
+  for (auto& f : files) {
+    f.toi = encoder.send(
+        f.path, "application/octet-stream",
+        LibFlute::Encoder::seconds_since_epoch() + 60,
+        f.buffer, f.length,
+        static_cast<LibFlute::FecScheme>(args.fec),
+        /*copy_buffer=*/false);
+    if (f.toi > 0) {
+      spdlog::info("queued {} ({} bytes, TOI {})", f.path, f.length, f.toi);
+    }
+  }
+
+  // Pump packets until everything's been transmitted. Honour the
+  // encoder's rate-limit deadline by sleeping until the next due time.
+  while (encoder.has_pending()) {
+    if (!encoder.send_next_packet()) {
+      auto due = encoder.next_send_due();
+      if (due) {
+        auto now = std::chrono::steady_clock::now();
+        if (*due > now) std::this_thread::sleep_until(*due);
+      } else {
+        break;
+      }
+    }
+  }
+  // Drain any FDT-only packets the encoder might still have queued.
+  encoder.flush();
+
+  close(sock);
   return 0;
 }

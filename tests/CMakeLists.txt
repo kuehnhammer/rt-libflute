@@ -10,7 +10,8 @@ add_executable(libflute_tests
   unit/fdt_lifecycle_test.cpp
   unit/file_partitioning_test.cpp
   unit/file_test.cpp
-  unit/direct_receiver_test.cpp
+  unit/decoder_test.cpp
+  unit/integration_test.cpp
 )
 
 target_link_libraries(libflute_tests

@@ -1,4 +1,4 @@
-// DirectReceiver — embedder-facing entry path.
+// Decoder — embedder-facing entry path.
 //
 // RFC 5651 §3.1 + RFC 6726 App. A: a FLUTE receiver MUST filter ALC
 // packets by TSI (only packets matching the joined session's TSI
@@ -13,11 +13,11 @@
 //     fires a registered completion callback.
 //
 // All packets here are built by-hand from fixtures.hpp; no UDP, no
-// io_service. CompactNoCode FEC only (codepoint = 0). DirectReceiver
-// inherits ReceiverBase::handle_received_packet via its public
+// no event loop. CompactNoCode FEC only (codepoint = 0). Decoder
+// uses feed_packet() to accept ALC payloads.
 // feed_packet() wrapper.
 
-#include "DirectReceiver.h"
+#include "Decoder.h"
 
 #include <atomic>
 #include <cstdint>
@@ -66,10 +66,10 @@ std::string BuildFdtXml(std::uint32_t file_toi, std::uint64_t file_size,
 }  // namespace
 
 // RFC 5651 §3.1: the receiver MUST silently discard packets whose TSI
-// does not match the joined session's TSI. The DirectReceiver's
+// does not match the joined session's TSI. The Decoder's
 // file_list MUST stay empty when packets arrive on a foreign TSI.
-TEST(DirectReceiver, RejectsPacketsWithMismatchedTsi) {
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+TEST(Decoder, RejectsPacketsWithMismatchedTsi) {
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     libflute_test::DataPacketSpec spec;
     spec.tsi = 99;            // foreign TSI
@@ -97,7 +97,7 @@ TEST(DirectReceiver, RejectsPacketsWithMismatchedTsi) {
 // Test: send the entire FDT in one packet (T == fdt_size) and verify
 // that file_list afterwards contains a File entry for the FDT-
 // declared TOI.
-TEST(DirectReceiver, FdtPacketWithToi0AndExtFdtTriggersFdtParse) {
+TEST(Decoder, FdtPacketWithToi0AndExtFdtTriggersFdtParse) {
     constexpr std::uint64_t kFileTransferLength = 64;
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
@@ -109,7 +109,7 @@ TEST(DirectReceiver, FdtPacketWithToi0AndExtFdtTriggersFdtParse) {
     // be ≥ the XML size so the FDT fits in one source symbol.
     const std::uint16_t kFdtT = static_cast<std::uint16_t>(fdt_xml.size());
 
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     libflute_test::DataPacketSpec fdt_spec;
     fdt_spec.tsi = 1;
@@ -145,7 +145,7 @@ TEST(DirectReceiver, FdtPacketWithToi0AndExtFdtTriggersFdtParse) {
 // RFC 6726 §3.1 + App. A step 4: data packets are routed to the
 // matching File based on TOI. After the FDT announces TOI=5, a data
 // packet for TOI=5 must be accepted and surfaced via file_list().
-TEST(DirectReceiver, FilePacketRoutedToFileByToi) {
+TEST(Decoder, FilePacketRoutedToFileByToi) {
     constexpr std::uint64_t kFileTransferLength = 64;
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
@@ -153,7 +153,7 @@ TEST(DirectReceiver, FilePacketRoutedToFileByToi) {
 
     auto fdt_xml = BuildFdtXml(kFileToi, kFileTransferLength, kT, kMaxSbl);
 
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     // Step 1: deliver the FDT.
     libflute_test::DataPacketSpec fdt_spec;
@@ -172,7 +172,7 @@ TEST(DirectReceiver, FilePacketRoutedToFileByToi) {
     rx.feed_packet(AsSpan(fdt_packet));
 
     // Step 2: send a single file data packet for TOI=5 (one source
-    // symbol of T=64 bytes). DirectReceiver should already have a
+    // symbol of T=64 bytes). Decoder should already have a
     // File registered for TOI=5 thanks to the FDT.
     libflute_test::DataPacketSpec file_spec;
     file_spec.tsi = 1;
@@ -211,7 +211,7 @@ TEST(DirectReceiver, FilePacketRoutedToFileByToi) {
 // RFC 6726 App. A step 7: when a file is fully received, the
 // completion callback fires exactly once with a shared_ptr<File>
 // that is complete().
-TEST(DirectReceiver, CompletionCallbackFiresWhenFileFullyReceived) {
+TEST(Decoder, CompletionCallbackFiresWhenFileFullyReceived) {
     constexpr std::uint64_t kFileTransferLength = 64;
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
@@ -219,7 +219,7 @@ TEST(DirectReceiver, CompletionCallbackFiresWhenFileFullyReceived) {
 
     auto fdt_xml = BuildFdtXml(kFileToi, kFileTransferLength, kT, kMaxSbl);
 
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     std::atomic<int> callback_count{0};
     std::shared_ptr<LibFlute::File> received;

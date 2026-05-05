@@ -1,222 +1,183 @@
 // libflute - FLUTE/ALC library
 //
-// Copyright (C) 2021 Klaus Kühnhammer (Österreichische Rundfunksender GmbH & Co KG)
+// Demo receiver: opens a plain POSIX UDP socket (joining a multicast
+// group when the target is multicast) and feeds incoming payloads
+// into a LibFlute::Decoder. Network handling is the example's job,
+// not the library's.
 //
-// Licensed under the License terms and conditions for use, reproduction, and
-// distribution of 5G-MAG software (the “License”).  You may not use this file
-// except in compliance with the License.  You may obtain a copy of the License at
-// https://www.5g-mag.com/reference-tools.  Unless required by applicable law or
-// agreed to in writing, software distributed under the License is distributed on
-// an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied.
-// 
-// See the License for the specific language governing permissions and limitations
-// under the License.
-//
-#include <argp.h>                          // for argp_parse, ARGP_ERR_UNKNOWN
-#include <spdlog/common.h>                 // for level_enum
-#include <cstring>                         // for strrchr
-#include <syslog.h>                        // for LOG_CONS, LOG_PERROR, LOG_PID
-#include <boost/asio/impl/io_context.ipp>  // for io_context::io_context
-#include <boost/asio/io_service.hpp>       // for io_service
-#include <cstdio>                          // for snprintf, FILE, fclose, fopen
-#include <cstdlib>                         // for strtoul, calloc, free
-#include <exception>                       // for exception
-#include <memory>                          // for shared_ptr, __shared_ptr_a...
-#include <string>                          // for to_string, allocator, string
-#include "File.h"                          // for File
-#include "FileDeliveryTable.h"             // for FileDeliveryTable::FileEntry
-#include "ReceiverBase.h"                      // for Receiver
-#include "Receiver.h"                      // for Receiver
-#include "PcapReceiver.h"                  // for Receiver
-#include "Version.h"                       // for VERSION_MAJOR, VERSION_MINOR
-#include "spdlog/sinks/syslog_sink.h"      // for syslog_logger_mt
-#include "spdlog/spdlog.h"                 // for error, info, set_default_l...
-namespace libconfig { class Config; }
-namespace libconfig { class FileIOException; }
-namespace libconfig { class ParseException; }
+#include <argp.h>
+#include <arpa/inet.h>
+#include <cstring>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <syslog.h>
+#include <unistd.h>
 
-using libconfig::Config;
-using libconfig::FileIOException;
-using libconfig::ParseException;
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <string>
 
-static void print_version(FILE *stream, struct argp_state *state);
-void (*argp_program_version_hook)(FILE *, struct argp_state *) = print_version;
-const char *argp_program_bug_address = "5G-MAG Reference Tools <reference-tools@5g-mag.com>";
-static char doc[] = "FLUTE/ALC receiver demo";  // NOLINT
+#include "Decoder.h"
+#include "File.h"
+#include "FileDeliveryTable.h"
+#include "Version.h"
+#include "spdlog/sinks/syslog_sink.h"
+#include "spdlog/spdlog.h"
 
-static struct argp_option options[] = {  // NOLINT
-    {"interface", 'i', "IF", 0, "IP address of the interface to bind flute receivers to (default: 0.0.0.0)", 0},
-    {"target", 'm', "IP", 0, "Multicast address to receive on (default: 238.1.1.95)", 0},
-    {"port", 'p', "PORT", 0, "Multicast port (default: 40085)", 0},
-    {"capture-file", 'c', "FILE", 0, "Read input packets from a PCAP capture file instead of receiving from the network", 0},
-    {"tsi", 't', "TSI", 0, "TSI to receive (default: 0)", 0},
-    {"log-level", 'l', "LEVEL", 0,
-     "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
-     "critical, 6 = none. Default: 2.",
-     0},
-    {"download-dir", 'd', "Download directory", 0 , "Directory in which to store downloaded files, defaults to the current directory otherwise", 0},
-    {"num-files", 'n', "Stop Receiving after n files", 0, "Stop the reception after n files have been received (default is to never stop)", 0},
-    {nullptr, 0, nullptr, 0, nullptr, 0}};
+namespace {
 
-/**
- * Holds all options passed on the command line
- */
-struct ft_arguments {
-  const char *flute_interface = {};  /**< file path of the config file. */
-  const char *mcast_target = {};
-  const char *capture_file = nullptr;
+struct Args {
+  const char* iface = "0.0.0.0";
+  const char* mcast_target = "238.1.1.95";
   unsigned short mcast_port = 40085;
-  unsigned log_level = 2;        /**< log level */
-  char *download_dir = nullptr;
-  unsigned nfiles = 0;        /**< log level */
-  char **files;
-  unsigned tsi = 0;
+  unsigned log_level = 2;
+  std::uint64_t tsi = 16;
+  const char* download_dir = nullptr;
+  unsigned nfiles = 0;
 };
 
-/**
- * Parses the command line options into the arguments struct.
- */
-static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
-  auto arguments = static_cast<struct ft_arguments *>(state->input);
+argp_option options[] = {
+    {"interface", 'i', "IP", 0, "Local interface to bind to (default: 0.0.0.0)", 0},
+    {"target", 'm', "IP", 0, "Multicast (or unicast) address to receive on (default: 238.1.1.95)", 0},
+    {"port", 'p', "PORT", 0, "UDP port (default: 40085)", 0},
+    {"tsi", 't', "TSI", 0, "Session TSI (default: 16)", 0},
+    {"log-level", 'l', "LEVEL", 0, "Log verbosity 0..6 (default: 2)", 0},
+    {"download-dir", 'd', "DIR", 0, "Where to write received files (default: cwd)", 0},
+    {"num-files", 'n', "N", 0, "Stop after N files received (default: never)", 0},
+    {nullptr, 0, nullptr, 0, nullptr, 0},
+};
+
+error_t parse_opt(int key, char* arg, argp_state* state) {
+  auto* a = static_cast<Args*>(state->input);
   switch (key) {
-    case 'c':
-      arguments->capture_file = arg;
-      break;
-    case 'm':
-      arguments->mcast_target = arg;
-      break;
-    case 'i':
-      arguments->flute_interface = arg;
-      break;
-    case 'p':
-      arguments->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10));
-      break;
-    case 'l':
-      arguments->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10));
-      break;
-    case 'd':
-      arguments->download_dir = arg;
-      break;
-    case 'n':
-      arguments->nfiles = static_cast<unsigned>(strtoul(arg, nullptr, 10));
-      break;
-    case 't':
-      arguments->tsi = static_cast<unsigned>(strtoul(arg, nullptr, 10));
-      break;
-    default:
-      return ARGP_ERR_UNKNOWN;
+    case 'i': a->iface = arg; break;
+    case 'm': a->mcast_target = arg; break;
+    case 'p': a->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
+    case 't': a->tsi = strtoull(arg, nullptr, 10); break;
+    case 'l': a->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
+    case 'd': a->download_dir = arg; break;
+    case 'n': a->nfiles = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
+    default: return ARGP_ERR_UNKNOWN;
   }
   return 0;
 }
 
-static struct argp argp = {options, parse_opt, nullptr, doc,
-                           nullptr, nullptr,   nullptr};
-
-/**
- * Print the program version in MAJOR.MINOR.PATCH format.
- */
-void print_version(FILE *stream, struct argp_state * /*state*/) {
-  fprintf(stream, "%s.%s.%s\n", std::to_string(VERSION_MAJOR).c_str(),
-          std::to_string(VERSION_MINOR).c_str(),
-          std::to_string(VERSION_PATCH).c_str());
+void print_version(FILE* stream, argp_state*) {
+  std::fprintf(stream, "%d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 }
 
+bool ip_is_multicast(const sockaddr_in& a) {
+  return (ntohl(a.sin_addr.s_addr) & 0xF0000000U) == 0xE0000000U;
+}
 
+}  // namespace
 
-/**
- *  Main entry point for the program.
- *  
- * @param argc  Command line agument count
- * @param argv  Command line arguments
- * @return 0 on clean exit, -1 on failure
- */
-auto main(int argc, char **argv) -> int {
-  struct ft_arguments arguments;
-  /* Default values */
-  arguments.mcast_target = "238.1.1.95";
-  arguments.flute_interface= "0.0.0.0";
+void (*argp_program_version_hook)(FILE*, argp_state*) = print_version;
 
-  // Parse the arguments
-  argp_parse(&argp, argc, argv, 0, nullptr, &arguments);
+int main(int argc, char** argv) {
+  Args args;
+  argp argp_spec = {options, parse_opt, nullptr,
+                     "FLUTE/ALC receiver demo (plain POSIX UDP).",
+                     nullptr, nullptr, nullptr};
+  argp_parse(&argp_spec, argc, argv, 0, nullptr, &args);
 
-  // Set up logging
-  std::string ident = "flute-receiver";
-  auto syslog_logger = spdlog::syslog_logger_mt("syslog", ident, LOG_PID | LOG_PERROR | LOG_CONS );
+  auto syslog_sink = spdlog::syslog_logger_mt(
+      "syslog", "flute-receiver", LOG_PID | LOG_PERROR | LOG_CONS);
+  spdlog::set_default_logger(syslog_sink);
+  spdlog::set_level(static_cast<spdlog::level::level_enum>(args.log_level));
+  spdlog::set_pattern("[%H:%M:%S.%f] [%^%l%$] %v");
 
-  spdlog::set_level(
-      static_cast<spdlog::level::level_enum>(arguments.log_level));
-  spdlog::set_pattern("[%H:%M:%S.%f %z] [%^%l%$] [thr %t] %v");
+  // Open a UDP socket bound to the requested interface + port. If the
+  // target is an IPv4 multicast group, join it. Unicast just works
+  // without a group join.
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock < 0) {
+    spdlog::error("socket: {}", std::strerror(errno));
+    return 1;
+  }
+  int one = 1;
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
-  spdlog::set_default_logger(syslog_logger);
-  spdlog::info("FLUTE receiver demo starting up");
-
-  try {
-    // Create a Boost io_service
-    boost::asio::io_service io;
-
-    std::shared_ptr<LibFlute::ReceiverBase> receiver;
-
-    // Create the receiver
-    if (arguments.capture_file != nullptr) {
-      try {
-      receiver = std::make_shared<LibFlute::PcapReceiver>(
-          arguments.capture_file,
-          arguments.mcast_target,
-          arguments.mcast_port,
-          arguments.tsi,
-          io);
-      } catch (std::runtime_error& ex) {
-        spdlog::error("PCAP receiver error. {}", ex.what());
-        exit(1);
-      }
-    } else {
-      auto net_receiver = std::make_shared<LibFlute::Receiver>(
-          arguments.flute_interface,
-          arguments.mcast_target,
-          arguments.mcast_port,
-          arguments.tsi,
-          io);
-
-      receiver = net_receiver;
-    }
-
-    receiver->register_completion_callback(
-        [&](std::shared_ptr<LibFlute::File> file) { //NOLINT
-        spdlog::info("{} (TOI {}) has been received",
-            file->meta().content_location, file->meta().toi);
-        char *buf = (char*) calloc(256,1);
-        char *fname = (char*) strrchr(file->meta().content_location.c_str(),'/');
-        if(!fname){
-          fname = (char*) file->meta().content_location.c_str();
-        } else {
-          fname++;
-        }
-        if (arguments.download_dir) {
-          snprintf(buf,256,"%s/%s",arguments.download_dir, fname);
-        } else {
-          snprintf(buf,256,"flute_download_%d-%s",file->meta().toi, fname);
-        }
-        FILE* fd = fopen(buf, "wb");
-        if (fd) {
-          fwrite(file->buffer(), 1, file->length(), fd);
-          fclose(fd);
-        } else {
-          spdlog::error("Error opening file {} to store received object",buf);
-        }
-        free(buf);
-        if (file->meta().toi == arguments.nfiles) {
-          spdlog::warn("{} file(s) received. Stopping reception",arguments.nfiles);
-          receiver->stop();
-        }
-        });
-
-    // Start the IO service
-    io.run();
-  } catch (std::exception ex ) {
-    spdlog::error("Exiting on unhandled exception: {}", ex.what());
+  sockaddr_in bind_addr{};
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_port   = htons(args.mcast_port);
+  if (inet_pton(AF_INET, args.iface, &bind_addr.sin_addr) != 1) {
+    spdlog::error("invalid interface address: {}", args.iface);
+    close(sock);
+    return 1;
+  }
+  if (bind(sock, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+    spdlog::error("bind: {}", std::strerror(errno));
+    close(sock);
+    return 1;
   }
 
-exit:
+  sockaddr_in target{};
+  target.sin_family = AF_INET;
+  if (inet_pton(AF_INET, args.mcast_target, &target.sin_addr) != 1) {
+    spdlog::error("invalid target address: {}", args.mcast_target);
+    close(sock);
+    return 1;
+  }
+  if (ip_is_multicast(target)) {
+    ip_mreq mreq{};
+    mreq.imr_multiaddr = target.sin_addr;
+    if (inet_pton(AF_INET, args.iface, &mreq.imr_interface) != 1) {
+      mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    }
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+      spdlog::error("IP_ADD_MEMBERSHIP({}): {}", args.mcast_target,
+                    std::strerror(errno));
+      close(sock);
+      return 1;
+    }
+  }
+
+  LibFlute::Decoder decoder(args.tsi);
+
+  unsigned files_received = 0;
+  bool stop = false;
+  decoder.register_completion_callback(
+      [&](std::shared_ptr<LibFlute::File> file) {
+        spdlog::info("received {} (TOI {}, {} bytes)",
+                      file->meta().content_location, file->meta().toi,
+                      file->length());
+        std::string outpath;
+        const char* slash = std::strrchr(file->meta().content_location.c_str(), '/');
+        const char* fname = slash ? slash + 1 : file->meta().content_location.c_str();
+        if (args.download_dir) {
+          outpath = std::string(args.download_dir) + "/" + fname;
+        } else {
+          outpath = "flute_download_" + std::to_string(file->meta().toi) +
+                    "-" + fname;
+        }
+        if (FILE* fd = std::fopen(outpath.c_str(), "wb"); fd != nullptr) {
+          std::fwrite(file->buffer(), 1, file->length(), fd);
+          std::fclose(fd);
+        } else {
+          spdlog::error("open({}) for write: {}", outpath, std::strerror(errno));
+        }
+        ++files_received;
+        if (args.nfiles > 0 && files_received >= args.nfiles) {
+          spdlog::warn("{} file(s) received; stopping", files_received);
+          stop = true;
+        }
+      });
+
+  std::array<std::uint8_t, 65536> buffer;
+  while (!stop) {
+    ssize_t n = recvfrom(sock, buffer.data(), buffer.size(), 0, nullptr, nullptr);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      spdlog::error("recvfrom: {}", std::strerror(errno));
+      break;
+    }
+    decoder.feed_packet({buffer.data(), static_cast<std::size_t>(n)});
+  }
+
+  close(sock);
   return 0;
 }

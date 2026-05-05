@@ -21,14 +21,19 @@
 #pragma once
 /** \mainpage LibFlute - ALC/FLUTE library
  *
- * The library contains two simple **example applications** as a starting point:
- * - examples/flute-transmitter.cpp for sending files
- * - examples/flute-receiver.cpp for receiving files
+ * libflute is a transport-agnostic FLUTE/ALC library. The library does
+ * not open sockets, run an event loop, or spawn threads; the caller
+ * drives both sides:
+ *  - LibFlute::Encoder (in include/Encoder.h) — TX side. Generates
+ *    ALC packet bytes via a PacketCallback the consumer registers;
+ *    the consumer is responsible for actually transmitting them
+ *    (sendto on a UDP socket, RLC SDU dispatch, …).
+ *  - LibFlute::Decoder (in include/Decoder.h) — RX side. Accepts
+ *    ALC packet payloads via feed_packet(); the consumer is
+ *    responsible for receiving and reassembling them.
  *
- * The relevant public headers for using this library are
- * - LibFlute::Transmitter (in include/Transmitter.h), and
- * - LibFlute::Receiver (in include/Receiver.h)
- *
+ * The example apps in examples/ demonstrate plain POSIX-socket
+ * transports on top of these classes.
  */
 
 #include <string>

@@ -8,7 +8,7 @@
 //             absence from a new FDT-Instance — files in flight
 //             persist across FDT updates.
 //
-// Tests drive DirectReceiver end-to-end via feed_packet(); each FDT
+// Tests drive Decoder end-to-end via feed_packet(); each FDT
 // is delivered as a single TOI=0 ALC packet whose payload is a
 // minimal FDT-Instance XML.
 //
@@ -19,7 +19,7 @@
 //   - In-flight FDT-receive collision when v=N+1 arrives mid-v=N
 //     (latent bug; fix-then-test deferred).
 
-#include "DirectReceiver.h"
+#include "Decoder.h"
 
 #include <atomic>
 #include <cstdint>
@@ -49,7 +49,7 @@ std::string BuildFdtXml(const std::vector<std::pair<std::uint32_t, std::uint64_t
     std::string xml;
     xml += R"(<?xml version="1.0" encoding="UTF-8"?>)";
     // NTP-epoch seconds for ~year 2058. Far enough out that
-    // ReceiverBase's expiry check (RFC 6726 §3.3) treats the FDT as
+    // Decoder's expiry check (RFC 6726 §3.3) treats the FDT as
     // valid in any realistic test-runtime clock. Tests that need to
     // exercise the EXPIRED branch override the receiver's clock to
     // produce a `now` that's past this value.
@@ -69,7 +69,7 @@ std::string BuildFdtXml(const std::vector<std::pair<std::uint32_t, std::uint64_t
 
 // Send the given FDT XML as a single TOI=0 ALC packet with the given
 // instance_id. T must be ≥ the XML size so it fits in one symbol.
-void SendFdtPacket(LibFlute::DirectReceiver& rx, std::uint32_t instance_id,
+void SendFdtPacket(LibFlute::Decoder& rx, std::uint32_t instance_id,
                     const std::string& xml) {
     libflute_test::DataPacketSpec spec;
     spec.tsi = 1;
@@ -101,7 +101,7 @@ bool FileListContainsToi(const std::vector<std::shared_ptr<LibFlute::File>>& fil
 TEST(FdtLifecycle, NewerFdtAcceptedAndAddsFileEntries) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     auto fdt_v1 = BuildFdtXml({{5, 64}}, kT, kMaxSbl);
     SendFdtPacket(rx, /*instance_id=*/1, fdt_v1);
@@ -121,7 +121,7 @@ TEST(FdtLifecycle, NewerFdtAcceptedAndAddsFileEntries) {
 TEST(FdtLifecycle, OlderFdtIsRejectedAfterNewerSeen) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     auto fdt_v2 = BuildFdtXml({{5, 64}, {6, 64}}, kT, kMaxSbl);
     SendFdtPacket(rx, /*instance_id=*/2, fdt_v2);
@@ -147,7 +147,7 @@ TEST(FdtLifecycle, OlderFdtIsRejectedAfterNewerSeen) {
 TEST(FdtLifecycle, RemovedFileEntryFromNewFdtDoesNotEvictExistingFile) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     // v=1 announces TOI 5 and TOI 6.
     auto fdt_v1 = BuildFdtXml({{5, 64}, {6, 64}}, kT, kMaxSbl);
@@ -170,7 +170,7 @@ TEST(FdtLifecycle, RemovedFileEntryFromNewFdtDoesNotEvictExistingFile) {
 TEST(FdtLifecycle, RepeatedFdtWithSameInstanceIdIsIdempotent) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     auto fdt = BuildFdtXml({{5, 64}}, kT, kMaxSbl);
     SendFdtPacket(rx, /*instance_id=*/3, fdt);
@@ -246,7 +246,7 @@ TEST(FdtExpires, IsExpiredReturnsTrueWhenNowExceedsExpires) {
 TEST(FdtLifecycle, ExpiredFdtInstanceIsRejectedAtParseTime) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     // Pin "now" to a value past the BuildFdtXml fixture's Expires.
     constexpr std::uint64_t kFutureNtp = 6'000'000'000ULL;  // ~year 2090
@@ -264,7 +264,7 @@ TEST(FdtLifecycle, ExpiredFdtInstanceIsRejectedAtParseTime) {
 TEST(FdtLifecycle, NonExpiredFdtInstanceIsAccepted) {
     constexpr std::uint32_t kT = 64;
     constexpr std::uint32_t kMaxSbl = 1;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     // Pin "now" before the fixture's Expires (5e9).
     rx.set_now_provider([] { return 4'000'000'000ULL; });
@@ -279,7 +279,7 @@ TEST(FdtLifecycle, NonExpiredFdtInstanceIsAccepted) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// In-flight FDT collision (RFC 6726 §3.3 + ReceiverBase routing)
+// In-flight FDT collision (RFC 6726 §3.3 + Decoder routing)
 // ---------------------------------------------------------------------------
 
 // When a v=N+1 FDT packet arrives BEFORE v=N's TOI=0 file has finished
@@ -299,7 +299,7 @@ TEST(FdtLifecycle, NonExpiredFdtInstanceIsAccepted) {
 TEST(FdtLifecycle, InFlightFdtCollisionWhenNewerInstanceArrivesMidReceive) {
     constexpr std::uint32_t kT_v1 = 64;          // v=1 symbol size
     constexpr std::uint32_t kMaxSbl = 4;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     // Build a v=1 FDT XML and pad it (via repeated File entries) so
     // that it spans at least 2 symbols of T=64.
@@ -371,7 +371,7 @@ TEST(FdtLifecycle, InFlightFdtCollisionWhenNewerInstanceArrivesMidReceive) {
 TEST(FdtLifecycle, InFlightFdtIgnoresOlderInstancePackets) {
     constexpr std::uint32_t kT_v2 = 64;
     constexpr std::uint32_t kMaxSbl = 4;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     auto fdt_v2 = BuildFdtXml({{10, 64}, {20, 64}, {30, 64}}, kT_v2, kMaxSbl);
     ASSERT_GE(fdt_v2.size(), 2U * kT_v2);
@@ -427,7 +427,7 @@ TEST(FdtLifecycle, InstanceIdWraparoundAt2Pow20IsCircular) {
     constexpr std::uint32_t kT = 128;
     constexpr std::uint32_t kMaxSbl = 1;
     constexpr std::uint32_t kMaxInstanceId = (1u << 20) - 1u;
-    LibFlute::DirectReceiver rx(/*tsi=*/1);
+    LibFlute::Decoder rx(/*tsi=*/1);
 
     auto fdt_old = BuildFdtXml({{5, 64}}, kT, kMaxSbl);
     SendFdtPacket(rx, /*instance_id=*/kMaxInstanceId, fdt_old);
