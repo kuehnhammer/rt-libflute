@@ -260,13 +260,25 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | Decoder/Encoder reception statistics | (operational, not RFC-required) | DONE in round 6 — see EncoderStats / DecoderStats and tests/unit/stats_test.cpp. |
 | Raptor FLUTE-glue throughput investigation | bench/flute_bench output | Round-6 benchmark surfaces ~2 MB/s Raptor throughput vs bare bitstem-r10's much higher numbers. See "Raptor FLUTE-glue perf hypotheses" section below for the diagnostic checklist. |
 
-## Raptor FLUTE-glue perf hypotheses (round-7 starting points)
+## Raptor FLUTE-glue perf hypotheses (round-7+ starting points)
 
 Round-6 `tests/bench/flute_bench` shows Raptor end-to-end at ~2 MB/s
 across all sizes (10 / 100 / 500 MB), versus the bare `lib/raptor`
 codec's measured throughput which is much higher. The gap is in the
 FLUTE wrapper, not the codec itself. Hypotheses to check first when
 investigation resumes:
+
+0. **Verify the build actually IS Release.** The cheapest mistake.
+   Check `build-claude-bench/CMakeCache.txt` for
+   `CMAKE_BUILD_TYPE=Release` AND
+   `CMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG` (CMake's default — the
+   project's `_INIT` flags don't always survive cache initialisation).
+   Confirm with `ninja -t commands flute_bench` that the actual
+   compile lines for the bench TU, the `flute` library TUs, AND the
+   `r10` library TUs all carry `-O3 -DNDEBUG`. If any of those fall
+   back to `-O0 -g` (Debug) or even `-O2 -g` (RelWithDebInfo), the
+   throughput numbers are meaningless. Last verified at round 7:
+   bench, flute, and r10 all built `-O3 -DNDEBUG -std=gnu++23` ✓.
 
 1. **Per-packet decode invocation.** If the FLUTE layer calls the R10
    decoder once per *received FEC packet* rather than batching all
