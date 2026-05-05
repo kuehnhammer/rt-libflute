@@ -169,9 +169,9 @@ remember).
 | 3 | FDT parser pattern-matched literal prefix instead of resolving xmlns:* declarations to URIs | XML Namespaces 1.0 §6.1 | `b608e7a` |
 | 3 | mbms2007:Cache-Control `<xs:choice>` not enforced (multi-child documents accepted silently) | TS 26.346 cl. 7.2.10.2 + Rel-7 XSD | `b608e7a` |
 | 3 | ReceiverBase used `!=` for FDT instance-ID comparison; older FDTs could supersede newer ones | RFC 6726 §3.3 monotonicity | `b608e7a` |
-| 4 | ReceiverBase linear `>` comparison didn't handle 20-bit instance-ID wraparound | RFC 6726 §3.3 + RFC 1982 | (round-4 commit) |
-| 4 | Receiver never checked FDT-Instance Expires; expired FDTs were applied indefinitely | RFC 6726 §3.3 Expires | (round-4 commit) |
-| 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | (round-4 commit) |
+| 4 | ReceiverBase linear `>` comparison didn't handle 20-bit instance-ID wraparound | RFC 6726 §3.3 + RFC 1982 | `f2c9a81` |
+| 4 | Receiver never checked FDT-Instance Expires; expired FDTs were applied indefinitely | RFC 6726 §3.3 Expires | `f2c9a81` |
+| 4 | In-flight TOI=0 File (sized for v=N) accepted v=N+1 packet bytes, corrupting both | RFC 6726 §3.3 + ReceiverBase routing | `f2c9a81` |
 
 ## Out of scope (future rounds)
 
