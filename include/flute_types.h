@@ -77,6 +77,13 @@ namespace LibFlute {
   // emit_cursor is a per-block hint used by File::get_next_symbols to
   // avoid O(K²) scans when emitting all symbols of a block one packet
   // at a time.
+  //
+  // The Raptor encoder owns its per-block symbol-data scratch inside
+  // RaptorFEC itself (so SourceBlock stays cache-friendly for
+  // CompactNoCode files which can have thousands of blocks).
+  // Symbol::data references either (a) the user file buffer
+  // (CompactNoCode encoder + receiver side, regardless of FEC), or
+  // (b) RaptorFEC's per-block scratch (Raptor encoder side).
   struct SourceBlock {
     uint32_t id = 0;
     bool complete = false;

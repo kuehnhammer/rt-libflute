@@ -162,11 +162,16 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
         srcblk.symbols.begin(), srcblk.symbols.end(),
         [](const auto& s) { return s.complete; });
     if (complete) {
-      // RaptorFEC::create_block allocates each symbol's data buffer
-      // via `new char[T]`; release them once the block is fully
-      // transmitted.
+      // RaptorFEC owns the per-block scratch in _enc_scratch[sbn]
+      // (one allocation per block, set up in create_block). Release
+      // it as a unit — Symbol::data pointers become dangling after
+      // this, which is fine because the block is marked complete
+      // and never re-emits.
+      if (srcblk.id < _enc_scratch.size()) {
+        _enc_scratch[srcblk.id].clear();
+        _enc_scratch[srcblk.id].shrink_to_fit();
+      }
       for (auto& s : srcblk.symbols) {
-        delete[] s.data;
         s.data = nullptr;
       }
     }
@@ -275,46 +280,63 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
   if (byte_off + blocksize > F) {
     blocksize = F - byte_off;
   }
-  // bitstem-r10 requires the encoder's source-symbol span to be
-  // exactly nsymbs * T bytes (RFC 5053 §5.4 source-block layout). For
-  // every block except possibly the last the file buffer is already
-  // a multiple of T, so no copy is needed. For the trailing block
-  // when F is not a multiple of T, pad with zeros into a temporary
-  // buffer; the receiver also operates on a K-padded buffer and
-  // truncates to F when the file is handed back.
-  const unsigned int padded_size = nsymbs * T;
-  std::vector<std::byte> padded;
-  std::span<const std::byte> source_span;
-  if (blocksize == padded_size) {
-    source_span = std::span<const std::byte>(
-        reinterpret_cast<const std::byte*>(buffer), blocksize);
-  } else {
-    padded.assign(padded_size, std::byte{0});
-    std::memcpy(padded.data(), buffer, blocksize);
-    source_span = std::span<const std::byte>(padded.data(), padded_size);
+  // RFC 5053 §5.4 source-block layout: bitstem-r10 wants exactly
+  // nsymbs × T bytes of source. For every block except possibly the
+  // last the file buffer is already a multiple of T, so we just
+  // memcpy the source slice into the block scratch. For the trailing
+  // block when F % T ≠ 0, the scratch is zero-initialised (resize)
+  // so the trailing partial source symbol gets zero-padding for free.
+  const unsigned int symbols_to_emit = target_K(blockid);
+  const unsigned int padded_size     = nsymbs * T;
+  // One allocation per block instead of `symbols_to_emit` separate
+  // `new char[T]` calls. The scratch's first nsymbs*T bytes hold the
+  // source symbols (slot i at offset i*T); the trailing
+  // (symbols_to_emit - nsymbs)*T bytes are written in-place by R10's
+  // EncodeSymbol() for the repair ESIs. Source ESIs (i < nsymbs) are
+  // already correct from the FileFiller copy below — Raptor's LT for
+  // ESI<K reproduces the source symbol byte-for-byte, so there's no
+  // reason to round-trip those bytes through Encoder::EncodeSymbol.
+  if (_enc_scratch.size() <= static_cast<std::size_t>(blockid)) {
+    _enc_scratch.resize(static_cast<std::size_t>(blockid) + 1);
   }
+  auto& scratch = _enc_scratch[blockid];
+  scratch.assign(static_cast<std::size_t>(symbols_to_emit) * T, '\0');
+  std::memcpy(scratch.data(), buffer, blocksize);
 
-  spdlog::debug("Constructing r10 encoder for SBN {}: K={} blocksize={} (padded={})",
-                blockid, nsymbs, blocksize, padded_size);
+  spdlog::debug("Constructing r10 encoder for SBN {}: K={} blocksize={} (padded={}) target_K={}",
+                blockid, nsymbs, blocksize, padded_size, symbols_to_emit);
 
   auto enc = bitstem::r10::fast::Encoder::Create(
-      static_cast<std::uint16_t>(nsymbs), source_span, T);
+      static_cast<std::uint16_t>(nsymbs),
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte*>(scratch.data()),
+          padded_size),
+      T);
   if (!enc.has_value()) {
     spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
                   blockid, nsymbs);
     throw std::runtime_error("Error creating r10 encoder");
   }
 
-  const unsigned int symbols_to_emit = target_K(blockid);
-  source_block.symbols.reserve(symbols_to_emit);
+  source_block.symbols.resize(symbols_to_emit);
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
-    LibFlute::Symbol sym{};
-    sym.data   = new char[T];
-    sym.length = T;
-    enc->EncodeSymbol(esi,
-                      std::span<std::byte>(
-                          reinterpret_cast<std::byte*>(sym.data), T));
-    source_block.symbols.push_back(sym);
+    char* slot = scratch.data() + esi * T;
+    if (esi >= nsymbs) {
+      // Repair symbol: r10 writes directly into the slot. No
+      // intermediate buffer + copy.
+      enc->EncodeSymbol(esi,
+                        std::span<std::byte>(
+                            reinterpret_cast<std::byte*>(slot), T));
+    }
+    // For source ESIs (esi < nsymbs) the slot already holds the
+    // correct bytes from the FileFiller memcpy above; r10's LT for
+    // those ESIs would reproduce the same bytes — skip the work.
+    source_block.symbols[esi] = LibFlute::Symbol{
+        .data     = slot,
+        .length   = T,
+        .complete = false,
+        .queued   = false,
+    };
   }
   if (bytes_read != nullptr) {
     *bytes_read += blocksize;

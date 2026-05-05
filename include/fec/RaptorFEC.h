@@ -57,6 +57,15 @@ namespace LibFlute {
       // calls for the same block.
       std::map<std::uint16_t, DecoderCtx> _dec_ctxs;
 
+      // Encoder-side per-block symbol scratch. One entry per source
+      // block (indexed by SBN); each holds target_K(sbn) * T bytes
+      // laid out as K source slots + (target_K - K) repair slots.
+      // Symbol::data on encoder-side SourceBlocks points into this.
+      // Lives on RaptorFEC rather than on SourceBlock so the
+      // (potentially thousands of) CompactNoCode SourceBlocks stay
+      // small + cache-friendly.
+      std::vector<std::vector<char>> _enc_scratch;
+
       // Helpers.
       DecoderCtx& ensure_dec_ctx(std::uint16_t sbn);
       LibFlute::SourceBlock create_block(char *buffer, int *bytes_read, int blockid);
