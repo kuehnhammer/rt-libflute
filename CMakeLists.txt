@@ -23,6 +23,7 @@ option(LIBFLUTE_BUILD_SOCKET_RECEIVER "Build the UDP/multicast Receiver class (r
 option(LIBFLUTE_BUILD_PCAP_RECEIVER   "Build the PcapReceiver class (requires libpcap and Boost.asio)" ON)
 option(LIBFLUTE_BUILD_TRANSMITTER     "Build the Transmitter class (requires Boost.asio)" ON)
 option(LIBFLUTE_BUILD_EXAMPLES        "Build the example executables (requires receiver and transmitter)" ON)
+option(LIBFLUTE_BUILD_TESTING         "Build libflute unit tests (fetches GoogleTest via FetchContent)" ON)
 option(ENABLE_RAPTOR                  "Enable support for Raptor FEC" OFF)
 
 # Anything Boost.asio-based needs Boost; collapse the three options
@@ -149,3 +150,21 @@ endif()
 
 # zlib was previously linked unconditionally but is unused in the code
 # (every ContentEncoding != NONE branch throws). Drop it.
+
+# ---------------------------------------------------------------------------
+# Tests. Disabled when libflute is consumed via add_subdirectory() unless
+# the embedder explicitly asks for them with -DLIBFLUTE_BUILD_TESTING=ON.
+# ---------------------------------------------------------------------------
+if(LIBFLUTE_BUILD_TESTING)
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.15.2
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+
+  enable_testing()
+  add_subdirectory(tests)
+endif()
