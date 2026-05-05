@@ -7,6 +7,7 @@ add_executable(libflute_tests
   unit/encoding_symbol_test.cpp
   unit/fdt_test.cpp
   unit/fdt_mbms_test.cpp
+  unit/fdt_lifecycle_test.cpp
   unit/file_partitioning_test.cpp
   unit/file_test.cpp
   unit/direct_receiver_test.cpp

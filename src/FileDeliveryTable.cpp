@@ -17,12 +17,101 @@
 #include <cstdlib>         // for strtoul, strtoull
 #include <stdexcept>        // for runtime_error
 #include <string>           // for string, to_string, stoull
+#include <string_view>
+#include <unordered_map>
 #include <utility>          // for move
 #include "spdlog/spdlog.h"  // for debug
 #include "tinyxml2.h"       // for XMLElement, XMLDocument, XMLPrinter, COLL...
 #ifdef RAPTOR_ENABLED
 #include "fec/RaptorFEC.h"
 #endif
+
+namespace {
+
+// MBMS / FLUTE FDT namespace URIs (TS 26.346 cl. 7.2.10 + per-release
+// XSD overlays). Senders may bind these URIs to any prefix they like
+// (`mbms2007:`, `cc:`, `n1:`, …) so the parser MUST resolve qualified
+// names against the document's xmlns declarations rather than
+// pattern-matching on the literal prefix.
+constexpr std::string_view kNsMbms2007 = "urn:3GPP:metadata:2007:MBMS:FLUTE:FDT";
+constexpr std::string_view kNsMbms2008 = "urn:3GPP:metadata:2008:MBMS:FLUTE:FDT_ext";
+constexpr std::string_view kNsMbms2009 = "urn:3GPP:metadata:2009:MBMS:FLUTE:FDT_ext";
+constexpr std::string_view kNsMbms2012 = "urn:3GPP:metadata:2012:MBMS:FLUTE:FDT";
+constexpr std::string_view kNsMbms2025 = "urn:3GPP:metadata:2025:MBMS:FLUTE:FDT";
+constexpr std::string_view kNsSchemaVersion =
+    "urn:3GPP:metadata:2009:MBMS:schemaVersion";
+
+// Map xmlns prefix → namespace URI as declared on the FDT-Instance
+// root. Real XML allows xmlns to be redefined in nested elements; we
+// don't (MBMS FDTs don't do that in practice), and keep this scoped to
+// the document root for simplicity. The empty key represents the
+// no-namespace bucket, where unqualified attribute / element names
+// like `Expires`, `File`, `TOI` live.
+using NsMap = std::unordered_map<std::string, std::string>;
+
+NsMap ReadXmlnsDeclarations(const tinyxml2::XMLElement* e) {
+    NsMap m;
+    m[std::string{}] = std::string{};  // unprefixed attrs are in no-namespace
+    for (const tinyxml2::XMLAttribute* a = e->FirstAttribute();
+         a != nullptr; a = a->Next()) {
+        const std::string name = a->Name() != nullptr ? a->Name() : "";
+        const std::string val  = a->Value() != nullptr ? a->Value() : "";
+        if (name.rfind("xmlns:", 0) == 0) {
+            m[name.substr(6)] = val;
+        }
+    }
+    return m;
+}
+
+// Split "prefix:local" into (prefix, local). If no colon, prefix == "".
+std::pair<std::string_view, std::string_view> SplitQName(std::string_view qn) {
+    auto pos = qn.find(':');
+    if (pos == std::string_view::npos) return {std::string_view{}, qn};
+    return {qn.substr(0, pos), qn.substr(pos + 1)};
+}
+
+// True when `qn` (a qualified name from the document) resolves to
+// (target_uri, target_local) under the supplied prefix→URI map.
+bool QNameMatches(std::string_view qn, const NsMap& ns,
+                  std::string_view target_uri, std::string_view target_local) {
+    auto [prefix, local] = SplitQName(qn);
+    if (local != target_local) return false;
+    auto it = ns.find(std::string(prefix));
+    if (it == ns.end()) return false;
+    return it->second == target_uri;
+}
+
+// Find the first child of `parent` whose qualified name resolves to
+// (uri, local-name). Returns nullptr if no match.
+tinyxml2::XMLElement*
+FindChildByNs(tinyxml2::XMLElement* parent, const NsMap& ns,
+              std::string_view target_uri, std::string_view target_local) {
+    for (auto* c = parent->FirstChildElement(); c != nullptr;
+         c = c->NextSiblingElement()) {
+        if (c->Name() != nullptr &&
+            QNameMatches(c->Name(), ns, target_uri, target_local)) {
+            return c;
+        }
+    }
+    return nullptr;
+}
+
+// Look up an attribute on `e` by namespace URI + local name. Skips the
+// xmlns:* declarations themselves.
+const char* FindAttrByNs(const tinyxml2::XMLElement* e, const NsMap& ns,
+                          std::string_view target_uri,
+                          std::string_view target_local) {
+    for (const auto* a = e->FirstAttribute(); a != nullptr; a = a->Next()) {
+        const std::string n = a->Name() != nullptr ? a->Name() : "";
+        if (n == "xmlns" || n.rfind("xmlns:", 0) == 0) continue;
+        if (QNameMatches(n, ns, target_uri, target_local)) {
+            return a->Value();
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_oti)
   : _instance_id( instance_id )
@@ -63,6 +152,42 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
   }
 
   spdlog::debug("Received new FDT with instance ID {}: {}", instance_id, buffer);
+
+  // Resolve xmlns prefixes once at the FDT-Instance root. Every MBMS
+  // qualified-name lookup below goes through this map so senders are
+  // free to bind the standard URIs to whatever prefix they like.
+  const NsMap ns = ReadXmlnsDeclarations(fdt_instance);
+
+  // TS 26.346 cl. 7.2.10.2 (Rel-8 mbms2008): FullFDT boolean attribute
+  // on FDT-Instance signals "this FDT supersedes prior partial ones".
+  if (const char* full_fdt_attr =
+          FindAttrByNs(fdt_instance, ns, kNsMbms2008, "FullFDT");
+      full_fdt_attr != nullptr) {
+    const std::string v(full_fdt_attr);
+    _full_fdt = (v == "true" || v == "1");
+  }
+
+  // TS 26.346 cl. 7.2.10 (sv:schemaVersion): if a marker is present,
+  // pick it up. Default stays at 1.
+  if (auto* sv = FindChildByNs(fdt_instance, ns, kNsSchemaVersion,
+                                "schemaVersion");
+      sv != nullptr) {
+    if (const char* text = sv->GetText(); text != nullptr) {
+      _schema_version = static_cast<int>(strtol(text, nullptr, 0));
+    }
+  }
+
+  // TS 26.346 cl. 7.2.10.2 (Rel-11/12 mbms2012): Base-URL-1 / Base-URL-2
+  // children of FDT-Instance carry anyURI base URLs for resolving
+  // relative File Content-Location references.
+  if (auto* b1 = FindChildByNs(fdt_instance, ns, kNsMbms2012, "Base-URL-1");
+      b1 != nullptr && b1->GetText() != nullptr) {
+    _base_url_1 = b1->GetText();
+  }
+  if (auto* b2 = FindChildByNs(fdt_instance, ns, kNsMbms2012, "Base-URL-2");
+      b2 != nullptr && b2->GetText() != nullptr) {
+    _base_url_2 = b2->GetText();
+  }
 
   uint8_t def_fec_encoding_id = 0;
   const auto* val = fdt_instance->Attribute("FEC-OTI-FEC-Encoding-ID");
@@ -156,16 +281,43 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     if (fec_transformer && !fec_transformer->parse_fdt_info(file)) {
       throw std::runtime_error("Failed to parse fdt info for specific FEC data");
     }
-    uint32_t expires = 0;
-    auto* cc = file->FirstChildElement("mbms2007:Cache-Control");
-    if (cc != nullptr) {
-      auto* expires_elem = cc->FirstChildElement("mbms2007:Expires");
-      if (expires_elem != nullptr) {
-        const char* expires_text = expires_elem->GetText();
-        if (expires_text != nullptr) {
-          expires = strtoul(expires_text, nullptr, 0);
+
+    // TS 26.346 cl. 7.2.10.2 (Rel-7 mbms2007): <Cache-Control> is an
+    // <xs:choice> of three alternatives — exactly one of <Expires>,
+    // <no-cache> or <max-stale>. Documents carrying more than one are
+    // XSD-invalid; reject them rather than picking arbitrarily.
+    uint64_t expires = 0;
+    FileDeliveryTable::CacheControl cache_control =
+        FileDeliveryTable::CacheControl::Expires;
+    if (auto* cc = FindChildByNs(file, ns, kNsMbms2007, "Cache-Control");
+        cc != nullptr) {
+      int child_count = 0;
+      bool have_expires  = false;
+      bool have_nocache  = false;
+      bool have_maxstale = false;
+      for (auto* c = cc->FirstChildElement(); c != nullptr;
+           c = c->NextSiblingElement()) {
+        ++child_count;
+        if (c->Name() == nullptr) continue;
+        const std::string_view qn = c->Name();
+        if (QNameMatches(qn, ns, kNsMbms2007, "Expires")) {
+          have_expires = true;
+          if (const char* t = c->GetText(); t != nullptr) {
+            expires = strtoull(t, nullptr, 0);
+          }
+        } else if (QNameMatches(qn, ns, kNsMbms2007, "no-cache")) {
+          have_nocache = true;
+        } else if (QNameMatches(qn, ns, kNsMbms2007, "max-stale")) {
+          have_maxstale = true;
         }
       }
+      if (child_count > 1) {
+        throw std::runtime_error(
+            "mbms2007:Cache-Control violates xs:choice — multiple children present");
+      }
+      if (have_nocache)       cache_control = FileDeliveryTable::CacheControl::NoCache;
+      else if (have_maxstale) cache_control = FileDeliveryTable::CacheControl::MaxStale;
+      else if (have_expires)  cache_control = FileDeliveryTable::CacheControl::Expires;
     }
 
     FecOti fec_oti{
@@ -176,16 +328,71 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
         ""
     };
 
-    FileEntry fe{
-      toi,
-      std::string(content_location),
-      content_length,
-      std::string(content_md5),
-      std::string(content_type),
-      expires,
-      fec_oti,
-      fec_transformer
+    FileEntry fe{};
+    fe.toi               = toi;
+    fe.content_location  = std::string(content_location);
+    fe.content_length    = content_length;
+    fe.content_md5       = std::string(content_md5);
+    fe.content_type      = std::string(content_type);
+    fe.expires           = expires;
+    fe.cache_control     = cache_control;
+    fe.fec_oti           = fec_oti;
+    fe.fec_transformer   = fec_transformer;
+
+    // TS 26.346 cl. 7.2.10.2 (Rel-9 mbms2009): per-File decryption key URI.
+    if (const char* dku =
+            FindAttrByNs(file, ns, kNsMbms2009, "Decryption-KEY-URI");
+        dku != nullptr) {
+      fe.decryption_key_uri = dku;
+    }
+
+    // TS 26.346 cl. 7.2.10.2 (Rel-11/12 mbms2012): per-File MBMS attrs.
+    if (const char* etag = FindAttrByNs(file, ns, kNsMbms2012, "File-ETag");
+        etag != nullptr) {
+      fe.file_etag = etag;
+    }
+    if (const char* frl =
+            FindAttrByNs(file, ns, kNsMbms2012, "FEC-Redundancy-Level");
+        frl != nullptr) {
+      fe.fec_redundancy_level =
+          static_cast<uint32_t>(strtoul(frl, nullptr, 0));
+    }
+    auto collect_alt_cl = [&](tinyxml2::XMLElement* parent,
+                                std::vector<std::string>& out) {
+      for (auto* e = parent->FirstChildElement(); e != nullptr;
+           e = e->NextSiblingElement()) {
+        if (e->Name() != nullptr &&
+            QNameMatches(e->Name(), ns, kNsMbms2012,
+                         "Alternate-Content-Location")) {
+          if (const char* t = e->GetText(); t != nullptr) {
+            out.emplace_back(t);
+          }
+        }
+      }
     };
+    if (auto* acl1 = FindChildByNs(file, ns, kNsMbms2012,
+                                    "Alternate-Content-Location-1");
+        acl1 != nullptr) {
+      collect_alt_cl(acl1, fe.alternate_content_locations_1);
+    }
+    if (auto* acl2 = FindChildByNs(file, ns, kNsMbms2012,
+                                    "Alternate-Content-Location-2");
+        acl2 != nullptr) {
+      collect_alt_cl(acl2, fe.alternate_content_locations_2);
+    }
+
+    // TS 26.346 cl. 7.2.10.2 (Rel-19 mbms2025): repair attributes.
+    if (const char* rs = FindAttrByNs(file, ns, kNsMbms2025, "Repair-Start");
+        rs != nullptr) {
+      fe.repair_start = rs;
+    }
+    if (const char* rlp =
+            FindAttrByNs(file, ns, kNsMbms2025, "Repair-Limit-Percentage");
+        rlp != nullptr) {
+      fe.repair_limit_percentage =
+          static_cast<uint32_t>(strtoul(rlp, nullptr, 0));
+    }
+
     _file_entries.push_back(fe);
   }
 }
@@ -216,8 +423,41 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   root->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)_global_fec_oti.encoding_id);
   root->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", (unsigned)_global_fec_oti.max_source_block_length);
   root->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)_global_fec_oti.encoding_symbol_length);
+  // TS 26.346 cl. 7.2.10 + per-release XSDs: declare all the MBMS
+  // namespaces this implementation may emit, plus the schema-version
+  // namespace. Receivers expect these prefixes when reading the
+  // qualified attributes/elements below.
   root->SetAttribute("xmlns:mbms2007", "urn:3GPP:metadata:2007:MBMS:FLUTE:FDT");
+  root->SetAttribute("xmlns:mbms2008", "urn:3GPP:metadata:2008:MBMS:FLUTE:FDT_ext");
+  root->SetAttribute("xmlns:mbms2009", "urn:3GPP:metadata:2009:MBMS:FLUTE:FDT_ext");
+  root->SetAttribute("xmlns:mbms2012", "urn:3GPP:metadata:2012:MBMS:FLUTE:FDT");
+  root->SetAttribute("xmlns:mbms2025", "urn:3GPP:metadata:2025:MBMS:FLUTE:FDT");
+  root->SetAttribute("xmlns:sv",       "urn:3GPP:metadata:2009:MBMS:schemaVersion");
+
+  if (_full_fdt.has_value()) {
+    root->SetAttribute("mbms2008:FullFDT", *_full_fdt ? "true" : "false");
+  }
   doc.InsertEndChild(root);
+
+  // TS 26.346 cl. 7.2.10: emit the schema-version structural marker
+  // before any Base-URL or File children. The Rel-9 schemaVersion XSD
+  // declares it as a top-level child of FDT-Instance.
+  {
+    auto* sv = doc.NewElement("sv:schemaVersion");
+    sv->SetText(std::to_string(_schema_version).c_str());
+    root->InsertEndChild(sv);
+  }
+
+  if (_base_url_1.has_value()) {
+    auto* b1 = doc.NewElement("mbms2012:Base-URL-1");
+    b1->SetText(_base_url_1->c_str());
+    root->InsertEndChild(b1);
+  }
+  if (_base_url_2.has_value()) {
+    auto* b2 = doc.NewElement("mbms2012:Base-URL-2");
+    b2->SetText(_base_url_2->c_str());
+    root->InsertEndChild(b2);
+  }
 
   for (const auto& file : _file_entries) {
     auto* f = doc.NewElement("File");
@@ -227,13 +467,67 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
     f->SetAttribute("Transfer-Length", static_cast<uint64_t>(file.fec_oti.transfer_length));
     f->SetAttribute("Content-MD5", file.content_md5.c_str());
     f->SetAttribute("Content-Type", file.content_type.c_str());
-    if(file.fec_transformer) {
+    if (!file.decryption_key_uri.empty()) {
+      f->SetAttribute("mbms2009:Decryption-KEY-URI", file.decryption_key_uri.c_str());
+    }
+    if (!file.file_etag.empty()) {
+      f->SetAttribute("mbms2012:File-ETag", file.file_etag.c_str());
+    }
+    if (file.fec_redundancy_level.has_value()) {
+      f->SetAttribute("mbms2012:FEC-Redundancy-Level", *file.fec_redundancy_level);
+    }
+    if (!file.repair_start.empty()) {
+      f->SetAttribute("mbms2025:Repair-Start", file.repair_start.c_str());
+    }
+    if (file.repair_limit_percentage.has_value()) {
+      f->SetAttribute("mbms2025:Repair-Limit-Percentage",
+                      *file.repair_limit_percentage);
+    }
+    if (file.fec_transformer) {
       file.fec_transformer->add_fdt_info(f);
     }
+
+    auto emit_alt_cl = [&](const char* tag,
+                            const std::vector<std::string>& urls) {
+      if (urls.empty()) return;
+      auto* parent = doc.NewElement(tag);
+      for (const auto& url : urls) {
+        auto* e = doc.NewElement("mbms2012:Alternate-Content-Location");
+        e->SetText(url.c_str());
+        parent->InsertEndChild(e);
+      }
+      f->InsertEndChild(parent);
+    };
+    emit_alt_cl("mbms2012:Alternate-Content-Location-1",
+                file.alternate_content_locations_1);
+    emit_alt_cl("mbms2012:Alternate-Content-Location-2",
+                file.alternate_content_locations_2);
+
+    // TS 26.346 cl. 7.2.10.2 (Rel-7): emit the Cache-Control choice
+    // matching the FileEntry's discriminator. NoCache / MaxStale skip
+    // the Expires value.
     auto* cc = doc.NewElement("mbms2007:Cache-Control");
-    auto* exp = doc.NewElement("mbms2007:Expires");
-    exp->SetText(std::to_string(file.expires).c_str());
-    cc->InsertEndChild(exp);
+    switch (file.cache_control) {
+      case FileDeliveryTable::CacheControl::NoCache: {
+        auto* nc = doc.NewElement("mbms2007:no-cache");
+        nc->SetText("true");
+        cc->InsertEndChild(nc);
+        break;
+      }
+      case FileDeliveryTable::CacheControl::MaxStale: {
+        auto* ms = doc.NewElement("mbms2007:max-stale");
+        ms->SetText("true");
+        cc->InsertEndChild(ms);
+        break;
+      }
+      case FileDeliveryTable::CacheControl::Expires:
+      default: {
+        auto* exp = doc.NewElement("mbms2007:Expires");
+        exp->SetText(std::to_string(file.expires).c_str());
+        cc->InsertEndChild(exp);
+        break;
+      }
+    }
     f->InsertEndChild(cc);
     root->InsertEndChild(f);
   }

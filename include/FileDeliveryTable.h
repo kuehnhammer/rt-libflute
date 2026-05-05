@@ -16,6 +16,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <optional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -56,6 +57,21 @@ namespace LibFlute {
       uint32_t instance_id() { return _instance_id; };
 
      /**
+      *  TS 26.346 cl. 7.2.10.2 (Rel-7 mbms2007): the <Cache-Control>
+      *  element is an XSD <xs:choice> of three alternatives. Senders
+      *  MUST emit at most one; receivers MUST reject documents that
+      *  carry more than one. The default (when no Cache-Control
+      *  element is present) is treated as Expires with the value
+      *  carried in `expires` below — that's the path the round-1
+      *  tests already exercised before MBMS variants were added.
+      */
+      enum class CacheControl {
+        Expires,    // <mbms2007:Expires>NTP-seconds</...>
+        NoCache,    // <mbms2007:no-cache>true</...>
+        MaxStale,   // <mbms2007:max-stale>true</...>
+      };
+
+     /**
       *  An entry for a file in the FDT
       */
       struct FileEntry {
@@ -65,8 +81,19 @@ namespace LibFlute {
         std::string content_md5;
         std::string content_type;
         uint64_t expires;
+        CacheControl cache_control = CacheControl::Expires;
         FecOti fec_oti;
         std::shared_ptr<FecTransformer> fec_transformer;
+
+        // TS 26.346 cl. 7.2.10.2 MBMS extension fields. Empty / nullopt
+        // means "not present in the FDT XML".
+        std::string decryption_key_uri;                          // mbms2009 (Rel-9)
+        std::vector<std::string> alternate_content_locations_1;  // mbms2012 (Rel-11/12)
+        std::vector<std::string> alternate_content_locations_2;  // mbms2012
+        std::optional<uint32_t> fec_redundancy_level;            // mbms2012
+        std::string file_etag;                                    // mbms2012
+        std::string repair_start;                                 // mbms2025 (Rel-19) xs:dateTime
+        std::optional<uint32_t> repair_limit_percentage;          // mbms2025
       };
 
      /**
@@ -94,6 +121,22 @@ namespace LibFlute {
       */
       std::vector<FileEntry> file_entries() { return _file_entries; };
 
+      // TS 26.346 cl. 7.2.10.2 FDT-Instance-level MBMS extension fields.
+      // nullopt means "not present in the FDT XML".
+      std::optional<bool> full_fdt() const { return _full_fdt; }            // mbms2008 (Rel-8)
+      std::optional<std::string> base_url_1() const { return _base_url_1; } // mbms2012 (Rel-11/12)
+      std::optional<std::string> base_url_2() const { return _base_url_2; }
+      // TS 26.346 cl. 7.2.10 + TS26346_SchemaVersion.xsd: a serialised
+      // FDT-Instance MUST carry an <sv:schemaVersion> marker. Defaults
+      // to 1 (matches the marker emitted by libflute today and the
+      // value tagged by the schemaVersion XSD).
+      int schema_version() const { return _schema_version; }
+
+      void set_full_fdt(bool v) { _full_fdt = v; }
+      void set_base_url_1(std::string v) { _base_url_1 = std::move(v); }
+      void set_base_url_2(std::string v) { _base_url_2 = std::move(v); }
+      void set_schema_version(int v) { _schema_version = v; }
+
     private:
       uint32_t _instance_id;
 
@@ -102,5 +145,10 @@ namespace LibFlute {
       std::unique_ptr<FecTransformer> _fdt_fec_transformer = nullptr;
 
       uint64_t _expires;
+
+      std::optional<bool> _full_fdt;
+      std::optional<std::string> _base_url_1;
+      std::optional<std::string> _base_url_2;
+      int _schema_version = 1;
   };
 };

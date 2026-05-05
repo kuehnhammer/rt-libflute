@@ -63,9 +63,18 @@ auto LibFlute::ReceiverBase::handle_received_packet(char* data, size_t bytes) ->
     {
       const std::lock_guard<std::mutex> lock(_files_mutex);
 
-      if (alc.toi() == 0 && (!_fdt || _fdt->instance_id() != alc.fdt_instance_id())) {
+      // RFC 6726 §3.3: only newer FDT-Instance IDs supersede the
+      // current FDT. Stale (lower-or-equal) IDs are dropped, both to
+      // make repeats idempotent and to defend against out-of-order or
+      // replayed packets that would otherwise roll the receiver back
+      // to an older file set.
+      // TODO (round 4): replace `>` with a circular comparator over
+      // the 20-bit instance-ID space (RFC 6726 §3.3 wraparound).
+      if (alc.toi() == 0 && (!_fdt || alc.fdt_instance_id() > _fdt->instance_id())) {
         if (_files.find(alc.toi()) == _files.end()) {
-          FileDeliveryTable::FileEntry fe{0, "", alc.fec_oti().transfer_length, "", "", 0, alc.fec_oti(), nullptr};
+          FileDeliveryTable::FileEntry fe{};
+          fe.content_length = alc.fec_oti().transfer_length;
+          fe.fec_oti        = alc.fec_oti();
           _files.emplace(alc.toi(), std::make_shared<LibFlute::File>(fe));
         }
       }

@@ -1,9 +1,5 @@
 // FDT MBMS extensions — TS 26.346 cl. 7.2.10 + the per-release XSD
-// overlays at /home/klaus/workspace/3gpp/26346-j30/. Tests are written
-// against the spec, not the current parser; tests for fields the
-// current FileEntry struct doesn't surface are tagged GTEST_SKIP with
-// a pointer to the missing capability so a future round can flip them
-// on without re-deriving the spec context.
+// overlays at /home/klaus/workspace/3gpp/26346-j30/.
 //
 // XSD oracles (one per release):
 //   Rel-7 (mbms2007): Cache-Control choice (no-cache | max-stale | Expires)
@@ -12,11 +8,11 @@
 //   Rel-11/12 (mbms2012): Alternate-Content-Location-1/-2 (children),
 //                          Base-URL-1/-2 (children), FEC-Redundancy-Level
 //                          (unsignedInt attr), File-ETag (string attr)
-//   Rel-13 (mbms2015): IndependentUnitPositions
 //   Rel-19 (mbms2025): Repair-Start (dateTime), Repair-Limit-Percentage
 //
-// All tests use the parsing constructor of FileDeliveryTable. Each
-// fixture lives in fixtures_mbms.hpp.
+// All tests parse hand-built FDT XML fixtures (fixtures_mbms.hpp) and
+// assert that the parsed FileDeliveryTable / FileEntry surfaces the
+// extension fields per the XSD types.
 
 #include "FileDeliveryTable.h"
 
@@ -35,9 +31,6 @@ std::vector<char> XmlBuf(const char* xml) {
     return std::vector<char>(xml, xml + std::strlen(xml));
 }
 
-// Surrogate for "did the parser silently accept and produce one File
-// entry without crashing?" used in tests where the parser doesn't
-// surface the extension field but should at minimum not reject it.
 LibFlute::FileDeliveryTable Parse(const char* xml) {
     auto buf = XmlBuf(xml);
     return LibFlute::FileDeliveryTable(/*instance_id=*/1, buf.data(),
@@ -56,23 +49,20 @@ TEST(FdtMbms, Rel7CacheControlExpiresAttachedToFileEntry) {
     auto fdt = Parse(libflute_test::mbms::kRel7CacheControlExpires);
     auto entries = fdt.file_entries();
     ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].cache_control,
+              LibFlute::FileDeliveryTable::CacheControl::Expires);
     EXPECT_EQ(entries[0].expires, 3600U);
 }
 
 // Rel-7 XSD lists <no-cache>true</...> as one of the three Cache-Control
-// choices. A spec-aware parser must at minimum not reject the document.
-// Surfacing the no-cache flag back to the embedder requires a new
-// FileEntry field, which the current struct lacks — so we only check
-// non-rejection here.
+// choices.
 TEST(FdtMbms, Rel7CacheControlNoCacheRecognised) {
     auto fdt = Parse(libflute_test::mbms::kRel7CacheControlNoCache);
     auto entries = fdt.file_entries();
     ASSERT_EQ(entries.size(), 1U);
     EXPECT_EQ(entries[0].toi, 1U);
-
-    GTEST_SKIP() << "FileEntry has no field for the no-cache flag — "
-                    "round 2 should add a CacheControl variant member "
-                    "to FileDeliveryTable::FileEntry to surface this.";
+    EXPECT_EQ(entries[0].cache_control,
+              LibFlute::FileDeliveryTable::CacheControl::NoCache);
 }
 
 // Same as above for max-stale (third Cache-Control choice).
@@ -80,23 +70,14 @@ TEST(FdtMbms, Rel7CacheControlMaxStaleRecognised) {
     auto fdt = Parse(libflute_test::mbms::kRel7CacheControlMaxStale);
     auto entries = fdt.file_entries();
     ASSERT_EQ(entries.size(), 1U);
-    EXPECT_EQ(entries[0].toi, 1U);
-
-    GTEST_SKIP() << "FileEntry has no field for the max-stale flag — "
-                    "round 2 should add a CacheControl variant member "
-                    "to FileDeliveryTable::FileEntry to surface this.";
+    EXPECT_EQ(entries[0].cache_control,
+              LibFlute::FileDeliveryTable::CacheControl::MaxStale);
 }
 
 // Rel-7 XSD declares Cache-Control as <xs:choice> — the three options
 // are MUTUALLY EXCLUSIVE. A document that combines no-cache and
-// Expires is XSD-invalid; a strict parser MUST reject it.
+// Expires is XSD-invalid; the parser MUST reject it.
 TEST(FdtMbms, Rel7CacheControlChoiceMutualExclusion) {
-    GTEST_SKIP() << "Current parser silently accepts XSD-invalid "
-                    "Cache-Control with multiple children (no-cache + "
-                    "Expires). Round 2: enforce <xs:choice> by rejecting "
-                    "the document or warning + picking the first child "
-                    "deterministically.";
-
     EXPECT_THROW(Parse(libflute_test::mbms::kRel7CacheControlInvalidChoice),
                  std::runtime_error);
 }
@@ -105,17 +86,14 @@ TEST(FdtMbms, Rel7CacheControlChoiceMutualExclusion) {
 // Rel-8 (mbms2008) — FullFDT boolean attribute on FDT-Instance
 // ---------------------------------------------------------------------------
 
-// TS 26.346 cl. 7.2.10.2: mbms2008:FullFDT is a boolean attribute
-// signalling "this FDT-Instance supersedes all prior partial FDTs".
-// The parser must accept the attribute and (round 2) surface its
-// value via FileDeliveryTable.
+// TS 26.346 cl. 7.2.10.2: mbms2008:FullFDT="true" on FDT-Instance
+// signals "this FDT-Instance supersedes all prior partial FDTs". The
+// parser must surface the boolean value via the FullFDT accessor.
 TEST(FdtMbms, Rel8FullFdtBooleanRoundTrip) {
     auto fdt = Parse(libflute_test::mbms::kRel8FullFdtTrue);
     EXPECT_EQ(fdt.file_entries().size(), 1U);
-
-    GTEST_SKIP() << "FileDeliveryTable has no full_fdt() accessor — "
-                    "round 2 should add an optional<bool> _full_fdt "
-                    "member set during parsing of mbms2008:FullFDT.";
+    ASSERT_TRUE(fdt.full_fdt().has_value());
+    EXPECT_TRUE(*fdt.full_fdt());
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +107,8 @@ TEST(FdtMbms, Rel9DecryptionKeyUriRoundTrip) {
     auto fdt = Parse(libflute_test::mbms::kRel9DecryptionKeyUri);
     auto entries = fdt.file_entries();
     ASSERT_EQ(entries.size(), 1U);
-    EXPECT_EQ(entries[0].toi, 1U);
-
-    GTEST_SKIP() << "FileEntry has no decryption_key_uri field — "
-                    "round 2 should add std::string decryption_key_uri "
-                    "and parse mbms2009:Decryption-KEY-URI into it.";
+    EXPECT_EQ(entries[0].decryption_key_uri,
+              "https://kms.example.com/keys/abc123");
 }
 
 // ---------------------------------------------------------------------------
@@ -146,12 +121,16 @@ TEST(FdtMbms, Rel9DecryptionKeyUriRoundTrip) {
 // Alternate-Content-Location entries (anyURI) for unicast repair.
 TEST(FdtMbms, Rel12AlternateContentLocationListPreserved) {
     auto fdt = Parse(libflute_test::mbms::kRel12AlternateContentLocation);
-    EXPECT_EQ(fdt.file_entries().size(), 1U);
-
-    GTEST_SKIP() << "FileEntry has no alternate_content_locations field "
-                    "— round 2: add a "
-                    "std::vector<std::string> alternate_content_locations_1/2 "
-                    "and populate from mbms2012:Alternate-Content-Location-N.";
+    auto entries = fdt.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    ASSERT_EQ(entries[0].alternate_content_locations_1.size(), 2U);
+    EXPECT_EQ(entries[0].alternate_content_locations_1[0],
+              "https://cdn1.example.com/r12-acl.bin");
+    EXPECT_EQ(entries[0].alternate_content_locations_1[1],
+              "https://cdn2.example.com/r12-acl.bin");
+    ASSERT_EQ(entries[0].alternate_content_locations_2.size(), 1U);
+    EXPECT_EQ(entries[0].alternate_content_locations_2[0],
+              "https://repair.example.com/r12-acl.bin");
 }
 
 // TS 26.346 cl. 7.2.10.2: FDT-Instance MAY carry mbms2012:Base-URL-1
@@ -160,31 +139,29 @@ TEST(FdtMbms, Rel12AlternateContentLocationListPreserved) {
 TEST(FdtMbms, Rel12BaseUrl1And2Preserved) {
     auto fdt = Parse(libflute_test::mbms::kRel12BaseUrls);
     EXPECT_EQ(fdt.file_entries().size(), 1U);
-
-    GTEST_SKIP() << "FileDeliveryTable has no base_url_1/_2 accessor — "
-                    "round 2: add std::optional<std::string> _base_url_1/_2 "
-                    "and parse the mbms2012:Base-URL-N children.";
+    ASSERT_TRUE(fdt.base_url_1().has_value());
+    EXPECT_EQ(*fdt.base_url_1(), "https://primary.example.com/");
+    ASSERT_TRUE(fdt.base_url_2().has_value());
+    EXPECT_EQ(*fdt.base_url_2(), "https://secondary.example.com/");
 }
 
 // TS 26.346 cl. 7.2.10.2: mbms2012:FEC-Redundancy-Level (unsignedInt
 // percent value) on File requests the recommended FEC redundancy.
 TEST(FdtMbms, Rel12FecRedundancyLevelPreserved) {
     auto fdt = Parse(libflute_test::mbms::kRel12FecRedundancyLevel);
-    EXPECT_EQ(fdt.file_entries().size(), 1U);
-
-    GTEST_SKIP() << "FileEntry has no fec_redundancy_level field — "
-                    "round 2: add std::optional<uint32_t> "
-                    "fec_redundancy_level and parse the attribute.";
+    auto entries = fdt.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    ASSERT_TRUE(entries[0].fec_redundancy_level.has_value());
+    EXPECT_EQ(*entries[0].fec_redundancy_level, 20U);
 }
 
 // TS 26.346 cl. 7.2.10.2: mbms2012:File-ETag (string) on File matches
 // the HTTP ETag for cache-validation against an HTTP origin.
 TEST(FdtMbms, Rel12FileEtagPreserved) {
     auto fdt = Parse(libflute_test::mbms::kRel12FileEtag);
-    EXPECT_EQ(fdt.file_entries().size(), 1U);
-
-    GTEST_SKIP() << "FileEntry has no file_etag field — round 2: add "
-                    "std::string file_etag and parse mbms2012:File-ETag.";
+    auto entries = fdt.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].file_etag, "W/\"abc123\"");
 }
 
 // ---------------------------------------------------------------------------
@@ -193,17 +170,25 @@ TEST(FdtMbms, Rel12FileEtagPreserved) {
 // ---------------------------------------------------------------------------
 
 // TS 26.346 cl. 7.2.10: serialised FDT-Instance documents MUST carry
-// a <sv:schemaVersion> structural-versioning marker so receivers can
-// check supported features. This applies to documents the *codebase*
-// emits via to_string(); a parser must accept (and a producer must
-// emit) the marker.
+// a <sv:schemaVersion> structural-versioning marker. Parser must read
+// the version, emitter must output it on to_string().
 TEST(FdtMbms, SchemaVersionMarkerAcceptedOnParse) {
     auto fdt = Parse(libflute_test::mbms::kSchemaVersionMarker);
     EXPECT_EQ(fdt.file_entries().size(), 1U);
+    EXPECT_EQ(fdt.schema_version(), 1);
+}
 
-    GTEST_SKIP() << "FileDeliveryTable::to_string() does not emit "
-                    "<sv:schemaVersion>. Round 2: emit the marker and "
-                    "version it per TS 26.346 cl. 7.2.10.";
+// to_string() must emit the schemaVersion marker per TS 26.346 cl.
+// 7.2.10 — receivers depending on it for feature-set negotiation will
+// otherwise fail.
+TEST(FdtMbms, ToStringEmitsSchemaVersionMarker) {
+    LibFlute::FecOti oti{LibFlute::FecScheme::CompactNoCode, 0, 1024, 64, ""};
+    LibFlute::FileDeliveryTable fdt(/*instance_id=*/1, oti);
+    fdt.set_expires(2208988800ULL);
+    fdt.set_schema_version(1);
+    auto xml = fdt.to_string();
+    EXPECT_NE(xml.find("schemaVersion"), std::string::npos)
+        << "to_string() output should carry an sv:schemaVersion marker:\n" << xml;
 }
 
 // TS 26.346 cl. 7.2.10.2 (Rel-19): mbms2025:Repair-Start (dateTime)
@@ -211,9 +196,37 @@ TEST(FdtMbms, SchemaVersionMarkerAcceptedOnParse) {
 // the unicast repair window.
 TEST(FdtMbms, Rel19RepairAttributesPreservedIfPresent) {
     auto fdt = Parse(libflute_test::mbms::kRel19RepairAttributes);
-    EXPECT_EQ(fdt.file_entries().size(), 1U);
+    auto entries = fdt.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].repair_start, "2026-04-01T12:00:00Z");
+    ASSERT_TRUE(entries[0].repair_limit_percentage.has_value());
+    EXPECT_EQ(*entries[0].repair_limit_percentage, 35U);
+}
 
-    GTEST_SKIP() << "FileEntry has no repair_start / "
-                    "repair_limit_percentage fields — round 2: add the "
-                    "fields and parse the mbms2025 attributes.";
+// ---------------------------------------------------------------------------
+// XML namespace handling — prefix variation
+// ---------------------------------------------------------------------------
+
+// XML namespace prefixes are arbitrary labels chosen by the document
+// author. The XSDs pin namespace URIs (e.g.
+// `urn:3GPP:metadata:2009:MBMS:schemaVersion`) but a sender may bind
+// that URI to any prefix it likes. A receiver that pattern-matches
+// against the literal prefix string (e.g. `sv:schemaVersion`) silently
+// drops payloads from senders that chose a different prefix and is
+// not XML-namespace conformant.
+//
+// This test parses an FDT-Instance that binds the schemaVersion
+// namespace to `n1` and the Rel-7 Cache-Control namespace to `cc`,
+// and verifies that both fields are surfaced exactly as if the
+// canonical `sv` / `mbms2007` prefixes had been used.
+TEST(FdtMbms, ParserResolvesXmlNamespacesViaXmlnsMapNotPrefixString) {
+    auto fdt = Parse(
+        libflute_test::mbms::kCustomPrefixesSchemaVersionAndCacheControl);
+
+    auto entries = fdt.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].cache_control,
+              LibFlute::FileDeliveryTable::CacheControl::Expires);
+    EXPECT_EQ(entries[0].expires, 9000U);
+    EXPECT_EQ(fdt.schema_version(), 1);
 }

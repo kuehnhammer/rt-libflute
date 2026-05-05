@@ -163,4 +163,24 @@ inline constexpr const char* kRel19RepairAttributes = R"(<?xml version="1.0" enc
 </FDT-Instance>
 )";
 
+// XML namespace prefixes are arbitrary labels that bind to URIs via
+// xmlns declarations. A spec-conformant sender may bind the standard
+// MBMS namespace URIs to ANY prefix — `n1`, `cc`, `sv`, etc. The
+// parser MUST resolve qualified names via the xmlns map, not by
+// pattern-matching the literal prefix string. This fixture binds the
+// schemaVersion namespace to `n1` and the Rel-7 Cache-Control
+// namespace to `cc` to exercise that resolution path.
+inline constexpr const char* kCustomPrefixesSchemaVersionAndCacheControl = R"(<?xml version="1.0" encoding="UTF-8"?>
+<FDT-Instance xmlns:n1="urn:3GPP:metadata:2009:MBMS:schemaVersion"
+              xmlns:cc="urn:3GPP:metadata:2007:MBMS:FLUTE:FDT"
+              Expires="2208988800">
+  <n1:schemaVersion>1</n1:schemaVersion>
+  <File TOI="1" Content-Location="custom-prefix.bin" Content-Length="1024">
+    <cc:Cache-Control>
+      <cc:Expires>9000</cc:Expires>
+    </cc:Cache-Control>
+  </File>
+</FDT-Instance>
+)";
+
 }  // namespace libflute_test::mbms
