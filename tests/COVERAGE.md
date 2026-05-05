@@ -257,7 +257,66 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | `Encoder::send` 16-bit TSI/TOI cap | RFC 5651 §5.1 (TSI/TOI may be up to 48 bits) | Encoder/AlcPacket producer hardcodes `half_word_flag=1, toi_flag=0`; supporting wider IDs needs producer changes. |
 | Raptor decoder's repair tolerance | RFC 5053 / lib/raptor | Round-5 lossy tests deliberately stay within FEC budget; characterising the codec's actual loss limit and adding a "loss right at the edge" stress test would tighten coverage. |
 | Decoder/Encoder reception statistics | (operational, not RFC-required) | DONE in round 6 — see EncoderStats / DecoderStats and tests/unit/stats_test.cpp. |
-| Raptor FLUTE-glue throughput investigation | bench/flute_bench output | Round-6 benchmark surfaces ~2 MB/s Raptor throughput vs bare bitstem-r10's much higher numbers. Profile the glue layer (likely candidates: per-symbol std::map, per-symbol heap allocation in EncodingSymbol, the pad-and-rebuild path in RaptorFEC::create_block, std::map<u16, DecoderCtx> lookup hot path). |
+| Raptor FLUTE-glue throughput investigation | bench/flute_bench output | Round-6 benchmark surfaces ~2 MB/s Raptor throughput vs bare bitstem-r10's much higher numbers. See "Raptor FLUTE-glue perf hypotheses" section below for the diagnostic checklist. |
+
+## Raptor FLUTE-glue perf hypotheses (round-7 starting points)
+
+Round-6 `tests/bench/flute_bench` shows Raptor end-to-end at ~2 MB/s
+across all sizes (10 / 100 / 500 MB), versus the bare `lib/raptor`
+codec's measured throughput which is much higher. The gap is in the
+FLUTE wrapper, not the codec itself. Hypotheses to check first when
+investigation resumes:
+
+1. **Per-packet decode invocation.** If the FLUTE layer calls the R10
+   decoder once per *received FEC packet* rather than batching all
+   received symbols into one decode call per source block, every
+   call rebuilds the constraint matrix and re-runs schedule
+   construction. R10 is not designed for incremental operation;
+   single decode call per source block is the intended shape.
+   Inspection target: `RaptorFEC::process_symbol` in
+   `src/fec/RaptorFEC.cpp`.
+2. **Memory allocation in the inner path.** If symbol buffers are
+   allocated inside the receive loop rather than once per block,
+   every decode call allocates and frees ~K×T bytes (≈7 MB at
+   K=8192, T=900). Profile signal: kernel time in
+   `do_anonymous_page` / `__alloc_pages`. The same pattern bit the
+   r10 codec earlier in the optimization arc.
+3. **Symbol copy overhead.** If FLUTE hands the decoder a
+   vector-of-vectors / list-of-(ESI, symbol) pairs and the decoder
+   wants contiguous symbols, the conversion is an O(K×T) copy per
+   decode. Bandwidth-bound; ~50–100 ms at K=8192, not seconds, but
+   worth measuring.
+4. **LT row regeneration / pre-coding parameter recomputation.**
+   The decoder needs ESIs to construct LT rows. If the FLUTE
+   wrapper triggers full DerivePreCodingParameters per packet
+   instead of going through the constexpr LUT path that round-10
+   of bitstem-r10 optimized, the cost regressses. Check whether
+   the FLUTE wrapper hits the same parameter-derivation path the
+   bare benchmark exercises.
+5. **Source-block reconstruction concurrency.** A 100 MB file
+   produces ~12 source blocks; if they decode serially when they
+   could parallelize, that's a multiplier (not 100× but real). Less
+   important than (1)/(2) but easy to measure once those are out
+   of the way.
+6. **FLUTE bookkeeping in the per-packet path.** Header parsing,
+   ALC reassembly, FDT-instance routing — none should dominate, but
+   a poorly-built FLUTE receiver can spend significant time in
+   per-packet state management. Check `Decoder::feed_packet` /
+   `File::put_symbol` hot paths.
+
+**Diagnostic narrowing question:** of the ~3340 ms decoder time at
+F = 10 MB / Raptor in the bench, how much is *inside*
+`bitstem::r10::fast::Decoder::TryDecode` (i.e.
+`BuildDecodingScheduleInactivation` + `ApplyDecodingSchedule`) vs.
+the surrounding FLUTE-layer wrapping? If the inner-codec time is at
+or near the bare-benchmark expectation (~40 ms), the entire gap is
+glue overhead and the work is on libflute's side. If the inner time
+is much larger, something is calling the decoder pathologically
+often (hypothesis 1).
+
+Method: `perf record -g` on `flute_bench` with
+`FLUTE_BENCH_SIZES_MB=10`, then `perf report` with call-graph and
+look for the hot stacks under `Decoder::feed_packet`.
 
 ## Test-writing rules
 
