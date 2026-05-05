@@ -15,8 +15,7 @@
 //
 #include "AlcPacket.h"
 #include <netinet/in.h>      // for ntohl, htons, ntohs, htonl
-#include <cstdlib>          // for calloc, free
-#include <cstring>           // for memcpy
+#include <cstring>           // for memcpy, memset
 #include <stdexcept>         // for runtime_error
 #include <utility>           // for move
 #include "EncodingSymbol.h"  // for EncodingSymbol
@@ -287,7 +286,11 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
   }
 }
 
-LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_oti, const std::vector<LibFlute::EncodingSymbol>& symbols, size_t max_size, uint32_t fdt_instance_id) // NOLINT
+LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi,
+                                 LibFlute::FecOti fec_oti,
+                                 const std::vector<LibFlute::EncodingSymbol>& symbols,
+                                 size_t max_size, uint32_t fdt_instance_id,
+                                 std::span<uint8_t> out_buffer) // NOLINT
   : _fec_oti(std::move(fec_oti))
 {
   auto lct_header_len = 3;
@@ -295,13 +298,25 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     lct_header_len += 5;
   }
 
-  auto max_packet_length = max_size +
-    static_cast<long>(lct_header_len) * 4
-    + 4 ;
+  const std::size_t max_packet_length =
+      max_size + static_cast<std::size_t>(lct_header_len) * 4 + 4;
+  if (out_buffer.size() < max_packet_length) {
+    throw std::runtime_error("AlcPacket: out_buffer too small for packet");
+  }
 
-  _buffer = (char*)calloc(max_packet_length, sizeof(char));
+  // Caller's buffer is reused across packets and may carry residual
+  // bytes from the previous packet. Zero only the LCT header + the
+  // reserved fields that the wire format requires to be zero (the
+  // payload region is overwritten in full by EncodingSymbol::to_payload
+  // below). For TOI != 0 the header is 12 bytes (LCT base + CCI +
+  // TSI/TOI half); for TOI == 0 it's 32 bytes (+ EXT_FDT + EXT_FTI,
+  // EXT_FTI's 2 reserved bytes need to stay zero). 4 SBN/ESI bytes
+  // are also overwritten by to_payload.
+  char* const _buffer =
+      reinterpret_cast<char*>(out_buffer.data());
+  std::memset(_buffer, 0, static_cast<std::size_t>(lct_header_len) * 4);
 
-  auto* lct_header = (lct_header_t*)_buffer;
+  auto* lct_header = reinterpret_cast<lct_header_t*>(_buffer);
 
   lct_header->version = 1;
   lct_header->half_word_flag = 1;
@@ -346,16 +361,12 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi, LibFlute::FecOti fec_
     write_unaligned_u32(hdr_ptr,
         htonl(static_cast<uint32_t>(_fec_oti.transfer_length & 0xFFFFFFFFu)));
     hdr_ptr += 4;
-    hdr_ptr += 2; // reserved
+    hdr_ptr += 2; // reserved (zeroed by the memset above)
     write_unaligned_u16(hdr_ptr, htons(_fec_oti.encoding_symbol_length));
     hdr_ptr += 2;
     write_unaligned_u32(hdr_ptr, htonl(_fec_oti.max_source_block_length));
   }
 }
 
-LibFlute::AlcPacket::~AlcPacket()
-{
-  if (_buffer != nullptr) {
-    free(_buffer);
-  }
-}
+// Destructor is = default in the header now that the buffer is
+// caller-owned.

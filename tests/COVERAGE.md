@@ -256,6 +256,28 @@ the perf workload assumption (single-threaded HLS/DASH in a k8s
 core), parallelism is not added in round 8. Future round if a
 real workload shows up where parallel encode moves the needle.
 
+Round 9: AlcPacket producing constructor refactored to write into a
+caller-supplied span; Encoder owns one reusable scratch buffer
+sized to mtu and reuses it across every emitted packet. Eliminates
+the per-packet calloc/free + free-on-AlcPacket-destruction pair.
+
+End-to-end throughput diff R8 → R9 was ±5 % across all bench
+scenarios — within run-to-run noise. Glibc's tcache appears to
+have been recycling the 1500-byte allocation already, so the
+elimination only saved the per-packet memset (~100 ms theoretical
+for 500 MB CompactNoCode). The structural change is still
+worthwhile: it (a) simplifies the AlcPacket lifecycle (no owned
+buffer, default destructor), (b) sets up the round-10 visitor
+pipeline (FileFiller → R10 in-place → HeaderAdder) which needs a
+caller-owned packet/block buffer, and (c) makes the per-packet
+hot path fully alloc-free.
+
+The lifetime contract on PacketCallback's span is now documented:
+*the span is valid only for the duration of the callback*. Consumers
+that defer dispatch (queue + drain async) must copy the bytes.
+sendto/sendmsg-style synchronous consumers — the targeted shape —
+just dispatch the span as-is.
+
 ### `tests/unit/integration_test.cpp` — TX→RX round-trip
 
 End-to-end. Encoder emits ALC packet bytes via its PacketCallback;

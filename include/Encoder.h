@@ -183,6 +183,15 @@ class Encoder {
   Clock::time_point _next_send_due = Clock::time_point::min();
   bool              _running       = true;
 
+  // Reusable scratch for the wire bytes of one outgoing ALC packet.
+  // Sized to hold the worst-case packet (mtu); reused across every
+  // send_next_packet() call to avoid per-packet calloc/free + the
+  // associated kernel page-zeroing the profile flagged at ~5–7 % of
+  // encoder wall time. The PacketCallback is handed a span over
+  // this buffer; that span is valid only for the duration of the
+  // callback (consumers that defer dispatch must copy the bytes).
+  std::vector<std::uint8_t> _packet_scratch;
+
   // Lock-free counters. Read by stats() outside the encoder mutex.
   // Increments are coupled with the operations they describe and
   // therefore inherit the encoder's mutex ordering, but reads do not

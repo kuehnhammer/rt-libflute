@@ -17,6 +17,7 @@
 
 #include <cstddef>       // for size_t
 #include <cstdint>       // for uint8_t, uint32_t, uint64_t, uint16_t
+#include <span>
 #include <vector>         // for vector
 #include "flute_types.h"  // for ContentEncoding, FecOti, ContentEncoding::NONE
 namespace LibFlute { class EncodingSymbol; }
@@ -36,21 +37,35 @@ namespace LibFlute {
       AlcPacket(char* data, size_t len);
 
      /**
-      *  Create an ALC packet from encoding symbols 
+      *  Create an ALC packet from encoding symbols, writing the wire
+      *  bytes into the caller-provided buffer. AlcPacket does NOT
+      *  take ownership of `out_buffer`; the caller (typically the
+      *  Encoder) holds a reusable scratch buffer across packets to
+      *  avoid the per-packet calloc/free overhead the previous
+      *  internally-allocating constructor incurred.
+      *
+      *  After return, `wire_size()` reports how many bytes of
+      *  `out_buffer` carry the packet.
       *
       *  @param tsi Transport Stream Identifier
       *  @param toi Transport Object Identifier
       *  @param fec_oti OTI values
       *  @param symbols Vector of encoding symbols
-      *  @param max_size Maximum payload size
+      *  @param max_size Maximum encoding-symbol payload size
       *  @param fdt_instance_id FDT instance ID (only relevant for FDT with TOI=0)
+      *  @param out_buffer Caller-owned span; size MUST be ≥ the worst-
+      *                    case packet length for these parameters
+      *                    (typically the path MTU).
       */
-      AlcPacket(uint16_t tsi, uint16_t toi, FecOti fec_oti, const std::vector<EncodingSymbol>& symbols, size_t max_size, uint32_t fdt_instance_id);
+      AlcPacket(uint16_t tsi, uint16_t toi, FecOti fec_oti,
+                 const std::vector<EncodingSymbol>& symbols,
+                 size_t max_size, uint32_t fdt_instance_id,
+                 std::span<uint8_t> out_buffer);
 
      /**
       *  Default destructor.
       */
-      ~AlcPacket();
+      ~AlcPacket() = default;
 
      /**
       *  Get the TSI
@@ -88,14 +103,11 @@ namespace LibFlute {
       ContentEncoding content_encoding() const { return _content_encoding; };
 
      /**
-      *  Get a pointer to the payload data of the constructed packet
+      *  Number of wire bytes written into the producing constructor's
+      *  out_buffer. The packet is the [out_buffer.data(),
+      *  out_buffer.data() + wire_size()) range.
       */
-      char* data() const { return _buffer; };
-
-     /**
-      *  Get the payload size
-      */
-      size_t size() const { return _len; };
+      size_t wire_size() const { return _len; };
 
     private:
       uint64_t _tsi = 0;
@@ -109,8 +121,9 @@ namespace LibFlute {
       ContentEncoding _content_encoding = ContentEncoding::NONE;
       FecOti _fec_oti = {};
 
-      char* _buffer = nullptr;
-      size_t _len;
+      // Bytes written by the producing constructor into the caller's
+      // buffer. Unused by the parsing constructor.
+      size_t _len = 0;
 
       // RFC5651 5.1 - LCT Header Format
       struct __attribute__((packed)) lct_header_t {

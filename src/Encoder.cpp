@@ -43,7 +43,8 @@ Encoder::Encoder(std::uint64_t tsi, unsigned mtu,
       _tsi(tsi),
       _max_payload(static_cast<std::uint32_t>(
           (mtu > kFixedAlcOverhead) ? (mtu - kFixedAlcOverhead) : 0)),
-      _rate_limit_kbps(rate_limit_kbps) {
+      _rate_limit_kbps(rate_limit_kbps),
+      _packet_scratch(mtu) {
   constexpr std::uint32_t kDefaultMaxSourceBlockLength = 64;
   _fec_oti = FecOti{FecScheme::CompactNoCode, /*transfer_length*/ 0,
                      _max_payload, kDefaultMaxSourceBlockLength,
@@ -205,16 +206,17 @@ bool Encoder::send_next_packet() {
       return false;
     }
 
-    auto packet = std::make_shared<AlcPacket>(
+    AlcPacket packet(
         static_cast<std::uint16_t>(_tsi),
         static_cast<std::uint16_t>(sending_file->meta().toi),
         sending_file->meta().fec_oti, symbols, _max_payload,
-        sending_file->fdt_instance_id());
+        sending_file->fdt_instance_id(),
+        std::span<std::uint8_t>(_packet_scratch.data(),
+                                  _packet_scratch.size()));
 
     bool dispatched = false;
     if (_packet_cb) {
-      const auto* p = reinterpret_cast<const std::uint8_t*>(packet->data());
-      dispatched = _packet_cb({p, packet->size()});
+      dispatched = _packet_cb({_packet_scratch.data(), packet.wire_size()});
     }
     sending_file->mark_completed(symbols, dispatched);
 
@@ -226,7 +228,7 @@ bool Encoder::send_next_packet() {
     // K source symbols only); the breakdown reduces to all-source.
     if (dispatched) {
       _stats.packets_emitted.fetch_add(1, std::memory_order_relaxed);
-      _stats.bytes_emitted.fetch_add(packet->size(),
+      _stats.bytes_emitted.fetch_add(packet.wire_size(),
                                        std::memory_order_relaxed);
       const std::uint32_t k_block =
           sending_file->meta().fec_oti.max_source_block_length;
@@ -248,7 +250,7 @@ bool Encoder::send_next_packet() {
     // wall-time cost is paid out of this budget — i.e. if dispatch
     // took 1 ms, the next deadline is 1 ms closer.
     if (_rate_limit_kbps > 0 && dispatched) {
-      const std::uint64_t bits = static_cast<std::uint64_t>(packet->size()) * 8ULL;
+      const std::uint64_t bits = static_cast<std::uint64_t>(packet.wire_size()) * 8ULL;
       const std::uint64_t ns =
           (bits * 1'000'000ULL + _rate_limit_kbps - 1ULL) / _rate_limit_kbps;
       _next_send_due = Clock::now() + std::chrono::nanoseconds{ns};
