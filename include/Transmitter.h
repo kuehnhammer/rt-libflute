@@ -64,15 +64,7 @@ namespace LibFlute {
       virtual ~Transmitter();
 
      /**
-      *  Enable IPSEC ESP encryption of FLUTE payloads.
-      *
-      *  @param spi Security Parameter Index value to use
-      *  @param key AES key as a hex string (without leading 0x). Must be an even number of characters long.
-      */
-      void enable_ipsec( uint32_t spi, const std::string& aes_key);
-
-     /**
-      *  Transmit a file. 
+      *  Transmit a file.
       *  The caller must ensure the data buffer passed here remains valid until the completion callback 
       *  for this file is called.
       *
@@ -133,7 +125,6 @@ namespace LibFlute {
       FecOti _fec_oti;
 
       completion_callback_t _completion_cb = nullptr;
-      std::string _mcast_address;
 
       uint32_t _rate_limit = 0;
   };

@@ -52,7 +52,6 @@ static struct argp_option options[] = {  // NOLINT
     {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
     {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
     {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit (kbps), 0 = no limit, default: 1000 (1 Mbps)", 0},
-    {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP encryption of packets, provide a hex-encoded AES key here", 0},
     {"log-level", 'l', "LEVEL", 0,
      "Log verbosity: 0 = trace, 1 = debug, 2 = info, 3 = warn, 4 = error, 5 = "
      "critical, 6 = none. Default: 2.",
@@ -64,8 +63,6 @@ static struct argp_option options[] = {  // NOLINT
  */
 struct ft_arguments {
   const char *mcast_target = {};
-  bool enable_ipsec = false;
-  const char *aes_key = {};
   unsigned short mcast_port = 40085;
   unsigned short mtu = 1500;
   uint32_t rate_limit = 1000;
@@ -82,10 +79,6 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
   switch (key) {
     case 'm':
       arguments->mcast_target = arg;
-      break;
-    case 'k':
-      arguments->aes_key = arg;
-      arguments->enable_ipsec = true;
       break;
     case 'p':
       arguments->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10));
@@ -206,12 +199,6 @@ auto main(int argc, char **argv) -> int {
         arguments.rate_limit,
         LibFlute::FecScheme(arguments.fec),
         io);
-
-    // Configure IPSEC ESP, if enabled
-    if (arguments.enable_ipsec) 
-    {
-      transmitter.enable_ipsec(1, arguments.aes_key);
-    }
 
     // Register a completion callback
     transmitter.register_completion_callback(

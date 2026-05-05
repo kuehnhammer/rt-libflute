@@ -30,7 +30,6 @@
 #include "EncodingSymbol.h"
 #include "File.h"                                                   // for File
 #include "FileDeliveryTable.h"
-#include "IpSec.h"
 #include "spdlog/spdlog.h"
 
 LibFlute::Transmitter::Transmitter ( const std::string& address, short port,
@@ -44,8 +43,7 @@ LibFlute::Transmitter::Transmitter ( const std::string& address, short port,
   , _tsi(tsi)
   , _mtu(mtu)
   , _rate_limit(rate_limit)
-  , _mcast_address(address)
-    , _fec_scheme(fec_scheme)
+  , _fec_scheme(fec_scheme)
 {
   _max_payload = mtu -
     ( _endpoint.address().is_v6() ? 40 : 20) - // IP header
@@ -78,12 +76,7 @@ LibFlute::Transmitter::Transmitter ( const std::string& address, short port,
 
 LibFlute::Transmitter::~Transmitter() = default;
 
-auto LibFlute::Transmitter::enable_ipsec(uint32_t spi, const std::string& key) -> void 
-{
-  LibFlute::IpSec::enable_esp(spi, _mcast_address, LibFlute::IpSec::Direction::Out, key);
-}
-
-auto LibFlute::Transmitter::seconds_since_epoch() -> uint64_t 
+auto LibFlute::Transmitter::seconds_since_epoch() -> uint64_t
 {
   return std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::system_clock::now().time_since_epoch()).count() +

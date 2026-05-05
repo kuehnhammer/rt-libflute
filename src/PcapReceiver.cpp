@@ -25,10 +25,8 @@
 #include "AlcPacket.h"
 #include "EncodingSymbol.h"
 #include "File.h"                                                   // for File
-#include "IpSec.h"
 #include "spdlog/spdlog.h"
 #include "flute_types.h"
-#include "spdlog/spdlog.h"
 #include "netinet/ip.h"
 #include "netinet/udp.h"
 

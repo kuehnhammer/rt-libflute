@@ -49,7 +49,6 @@ static struct argp_option options[] = {  // NOLINT
     {"interface", 'i', "IF", 0, "IP address of the interface to bind flute receivers to (default: 0.0.0.0)", 0},
     {"target", 'm', "IP", 0, "Multicast address to receive on (default: 238.1.1.95)", 0},
     {"port", 'p', "PORT", 0, "Multicast port (default: 40085)", 0},
-    {"ipsec-key", 'k', "KEY", 0, "To enable IPSec/ESP decryption of packets, provide a hex-encoded AES key here", 0},
     {"capture-file", 'c', "FILE", 0, "Read input packets from a PCAP capture file instead of receiving from the network", 0},
     {"tsi", 't', "TSI", 0, "TSI to receive (default: 0)", 0},
     {"log-level", 'l', "LEVEL", 0,
@@ -67,8 +66,6 @@ struct ft_arguments {
   const char *flute_interface = {};  /**< file path of the config file. */
   const char *mcast_target = {};
   const char *capture_file = nullptr;
-  bool enable_ipsec = false;
-  const char *aes_key = {};
   unsigned short mcast_port = 40085;
   unsigned log_level = 2;        /**< log level */
   char *download_dir = nullptr;
@@ -91,10 +88,6 @@ static auto parse_opt(int key, char *arg, struct argp_state *state) -> error_t {
       break;
     case 'i':
       arguments->flute_interface = arg;
-      break;
-    case 'k':
-      arguments->aes_key = arg;
-      arguments->enable_ipsec = true;
       break;
     case 'p':
       arguments->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10));
@@ -184,12 +177,6 @@ auto main(int argc, char **argv) -> int {
           arguments.mcast_port,
           arguments.tsi,
           io);
-
-      // Configure IPSEC, if enabled
-      if (arguments.enable_ipsec) 
-      {
-        net_receiver->enable_ipsec(1, arguments.aes_key);
-      }
 
       receiver = net_receiver;
     }

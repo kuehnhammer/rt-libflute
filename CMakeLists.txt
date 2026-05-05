@@ -16,13 +16,12 @@ set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -O3")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # When embedded in another project (e.g. 5gbc-rx) only the parser core
-# plus DirectReceiver is needed. The socket/pcap/ipsec/transmitter parts
-# pull in Boost.asio, libpcap, libnl-3, etc. — gated behind options so
+# plus DirectReceiver is needed. The socket/pcap/transmitter parts
+# pull in Boost.asio, libpcap, etc. — gated behind options so
 # embedders can opt out.
 option(LIBFLUTE_BUILD_SOCKET_RECEIVER "Build the UDP/multicast Receiver class (requires Boost.asio)" ON)
 option(LIBFLUTE_BUILD_PCAP_RECEIVER   "Build the PcapReceiver class (requires libpcap and Boost.asio)" ON)
 option(LIBFLUTE_BUILD_TRANSMITTER     "Build the Transmitter class (requires Boost.asio)" ON)
-option(LIBFLUTE_ENABLE_IPSEC          "Build IPSec ESP key plumbing (requires libnl-3.0)" ON)
 option(LIBFLUTE_BUILD_EXAMPLES        "Build the example executables (requires receiver and transmitter)" ON)
 option(ENABLE_RAPTOR                  "Enable support for Raptor FEC" OFF)
 
@@ -46,10 +45,6 @@ if(LIBFLUTE_BUILD_PCAP_RECEIVER)
   find_package(PCAP REQUIRED)
 endif()
 
-if(LIBFLUTE_ENABLE_IPSEC)
-  pkg_check_modules(NETLINK REQUIRED IMPORTED_TARGET libnl-3.0)
-endif()
-
 if(LIBFLUTE_BUILD_EXAMPLES)
   if(NOT (LIBFLUTE_BUILD_SOCKET_RECEIVER AND LIBFLUTE_BUILD_TRANSMITTER))
     message(STATUS "libflute: examples require both the socket Receiver and the Transmitter; disabling.")
@@ -69,9 +64,6 @@ include_directories(
     )
 if(LIBFLUTE_BUILD_PCAP_RECEIVER)
   include_directories(SYSTEM ${PCAP_INCLUDEDIR})
-endif()
-if(LIBFLUTE_ENABLE_IPSEC)
-  include_directories(SYSTEM PkgConfig::NETLINK)
 endif()
 
 configure_file("include/Version.h.in" "Version.h")
@@ -123,13 +115,6 @@ if(LIBFLUTE_BUILD_PCAP_RECEIVER)
   )
 endif()
 
-if(LIBFLUTE_ENABLE_IPSEC)
-  target_sources(flute
-    PRIVATE src/IpSec.cpp
-    PUBLIC  include/IpSec.h
-  )
-endif()
-
 target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/include/)
 
 if(ENABLE_RAPTOR)
@@ -160,10 +145,6 @@ endif()
 
 if(LIBFLUTE_BUILD_PCAP_RECEIVER)
   target_link_libraries(flute LINK_PUBLIC ${PCAP_LIBRARY})
-endif()
-
-if(LIBFLUTE_ENABLE_IPSEC)
-  target_link_libraries(flute LINK_PUBLIC PkgConfig::NETLINK)
 endif()
 
 # zlib was previously linked unconditionally but is unused in the code
