@@ -162,20 +162,51 @@ operators.
 Not a gtest target; built only with `-DLIBFLUTE_BUILD_BENCH=ON`.
 Round-trips 10 / 100 / 500 MB buffers through Encoder→Decoder
 in-process and prints throughput, packet counts, and FEC overhead.
-Round-6 baseline numbers (Release, bitstem-r10 fast decoder, mtu=1500):
 
-| F | FEC | Throughput | FEC overhead |
-|---|---|---|---|
-| 10 MB  | None   | ~305 MB/s | 0 |
-| 10 MB  | Raptor | ~2.4 MB/s | 15.0 % |
-| 100 MB | None   | ~105 MB/s | 0 |
-| 100 MB | Raptor | ~2.1 MB/s | 13.5 % |
-| 500 MB | None   | ~10.7 MB/s | 0 |
-| 500 MB | Raptor | ~2.1 MB/s | 14.9 % |
+Round-7 final numbers (Release, bitstem-r10 fast codec, mtu=1500),
+after deferred-decode + emit-cursor + map→vector data-structure swap:
 
-The Raptor numbers are dramatically below the bare bitstem-r10
-codec's measured throughput; the FLUTE-layer glue is the bottleneck.
-Investigation is round-7+ work.
+| F | FEC | Throughput | Decoder wall | FEC overhead |
+|---|---|---|---|---|
+| 10 MB  | None   | ~461 MB/s | 6 ms     | 0 |
+| 10 MB  | Raptor | ~72 MB/s  | 49 ms    | 15.0 % |
+| 100 MB | None   | ~428 MB/s | 69 ms    | 0 |
+| 100 MB | Raptor | ~85 MB/s  | 434 ms   | 15.0 % |
+| 500 MB | None   | ~283 MB/s | 644 ms   | 0 |
+| 500 MB | Raptor | ~90 MB/s  | 2.15 s   | 15.0 % |
+
+Round-6 baseline → round-7 final speedups:
+
+| F | FEC | Pre | Post | Speedup |
+|---|---|---|---|---|
+| 10 MB  | None   | 305 MB/s | 461 MB/s | 1.5× |
+| 10 MB  | Raptor | 2.4 MB/s | 72 MB/s  | 30× |
+| 100 MB | None   | 105 MB/s | 428 MB/s | 4.1× |
+| 100 MB | Raptor | 2.1 MB/s | 85 MB/s  | 40× |
+| 500 MB | None   | 10.7 MB/s | 283 MB/s | 26× |
+| 500 MB | Raptor | 2.1 MB/s | 90 MB/s  | 43× |
+
+Three independent fixes contributed (in commit order, each measured
+individually before the next was added):
+  1. **Deferred decode** (process_symbol no longer calls TryDecode
+     per packet; trigger fires when FDT abandons the TOI). Decoder
+     wall time dropped 56–83× on Raptor.
+  2. **Emit cursor** in `File::get_next_symbols` (stop restarting
+     iteration from block 0 each call). Modest win on its own;
+     blocked by the inner-loop O(K²) scan that fix 3 closed.
+  3. **`std::map → std::vector`** for both `_source_blocks` (keyed
+     by SBN) and `SourceBlock::symbols` (keyed by ESI). ESI / SBN
+     are dense small integers — std::map's per-node heap allocation
+     and O(log n) lookup were all overhead, no upside. Per-block
+     `emit_cursor` field on SourceBlock makes the inner emission
+     loop O(emitted) instead of O(K²). This was the dominant win —
+     CompactNoCode 500 MB went 29 s → 1.1 s.
+
+Raptor still encoder-bound at 90 MB/s (~3.4 s to build 500 MB worth
+of repair symbols; bitstem-r10's Encoder::Create per source block is
+the next bottleneck — same inactivation-decoder schedule cost the
+decoder used to pay, just on the TX side). Future round-8
+optimization candidate.
 
 ### `tests/unit/integration_test.cpp` — TX→RX round-trip
 
@@ -238,6 +269,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 | 5 | RaptorFEC `add_fdt_info` wrote per-attribute Z/N/Al fields but `parse_fdt_info` reads a base64'd `FEC-OTI-Scheme-Specific-Info` blob; sender and receiver disagreed on wire format | RFC 6726 §3.4.2 + RFC 5053 §3.2 | `27b6866` |
 | 6 | Sender-side `File` set `max_source_block_length = K*T` (bytes) for Raptor, breaking source/repair classification on both sides (CompactNoCode correctly used K-in-symbols) | RFC 5052 §3.4.2 | `36bbf17` |
 | 7 | RaptorFEC used `K = min(Kt, 8192) + remainder-in-last-block` partitioning; for Kt where Kt mod 8192 < 4 the last block's K fell below `kJKMinK = 4` and `bitstem::r10::Encoder::Create` rejected it (e.g. F = 11.4 MB at mtu=1500 → Kt=8195 → last block K=3, send fails). Replaced with proper §4.4.1.2 KL/KS/ZL/ZS distribution. | RFC 5053 §4.4.1.2 | `fd09076` |
+| 7 | RaptorFEC called `bitstem::r10::Decoder::TryDecode` per received symbol instead of once per source block, paying the inactivation-decoder schedule construction cost ~K × 1.15 times per block. End-to-end Raptor throughput was ~2 MB/s (vs ~12 MB/s after fix); decoder wall time was 2 orders of magnitude higher than the bare codec benchmark. Refactored to defer TryDecode to a `try_decode_pending` trigger fired by the Decoder when an in-flight TOI vanishes from the FDT. | (operational; per-block decode is the intended r10 shape) | (round-7 commit) |
 
 ## Out of scope (future rounds)
 
@@ -280,14 +312,14 @@ investigation resumes:
    throughput numbers are meaningless. Last verified at round 7:
    bench, flute, and r10 all built `-O3 -DNDEBUG -std=gnu++23` ✓.
 
-1. **Per-packet decode invocation.** If the FLUTE layer calls the R10
-   decoder once per *received FEC packet* rather than batching all
-   received symbols into one decode call per source block, every
-   call rebuilds the constraint matrix and re-runs schedule
-   construction. R10 is not designed for incremental operation;
-   single decode call per source block is the intended shape.
-   Inspection target: `RaptorFEC::process_symbol` in
-   `src/fec/RaptorFEC.cpp`.
+1. **~~Per-packet decode invocation.~~** **CONFIRMED + FIXED in
+   round 7.** RaptorFEC::check_source_block_completion called
+   `TryDecode` per received symbol, paying the schedule-construction
+   cost ~K × 1.15 times per block. Refactor: process_symbol just
+   calls AddReceivedSymbol; TryDecode runs once per block when the
+   FLUTE layer triggers `try_decode_pending` after the FDT no longer
+   lists the file's TOI. Decoder wall-time dropped 56–83× (see
+   bench table above).
 2. **Memory allocation in the inner path.** If symbol buffers are
    allocated inside the receive loop rather than once per block,
    every decode call allocates and frees ~K×T bytes (≈7 MB at

@@ -157,37 +157,56 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
 
 bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& srcblk) {
   if (is_encoder) {
-    bool complete = std::all_of(srcblk.symbols.begin(), srcblk.symbols.end(),
-                                [](const auto& s) { return s.second.complete; });
+    const bool complete = std::all_of(
+        srcblk.symbols.begin(), srcblk.symbols.end(),
+        [](const auto& s) { return s.complete; });
     if (complete) {
-      std::for_each(srcblk.symbols.begin(), srcblk.symbols.end(),
-                    [](const auto& s) { delete[] s.second.data; });
+      // RaptorFEC::create_block allocates each symbol's data buffer
+      // via `new char[T]`; release them once the block is fully
+      // transmitted.
+      for (auto& s : srcblk.symbols) {
+        delete[] s.data;
+        s.data = nullptr;
+      }
     }
     return complete;
   }
 
-  // Decoder side.
-  if (srcblk.symbols.empty()) {
-    spdlog::warn("Empty source block (size 0) SBN {}", srcblk.id);
-    return false;
-  }
-
+  // Decoder side. Per-symbol completion-check is now CHEAP — we just
+  // report whether this block has already been decoded. The actual
+  // TryDecode call is deferred to try_decode_pending(), which the
+  // FLUTE layer triggers once the file's transmission has ended
+  // (e.g. its TOI is no longer listed in the FDT). Calling TryDecode
+  // per received symbol — as the previous code did — paid the
+  // schedule-construction cost ~K × 1.15 times per source block,
+  // which dominated the round-trip wall time at K = 8192.
   auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
-  if (it == _dec_ctxs.end()) {
-    // No symbols delivered yet for this block.
-    return false;
+  if (it == _dec_ctxs.end()) return false;
+  return it->second.decoded;
+}
+
+bool LibFlute::RaptorFEC::try_decode_pending(
+    std::vector<LibFlute::SourceBlock>& blocks) {
+  if (is_encoder) return false;
+
+  bool any_decoded = false;
+  for (auto& srcblk : blocks) {
+    auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
+    if (it == _dec_ctxs.end()) continue;        // no symbols received
+    DecoderCtx& ctx = it->second;
+    if (ctx.decoded) continue;                   // already done
+    if (ctx.dec->TryDecode()) {
+      ctx.decoded   = true;
+      srcblk.complete = true;
+      any_decoded   = true;
+      spdlog::debug("Raptor: decoded source block {} on end-of-transmission trigger",
+                    srcblk.id);
+    } else {
+      spdlog::debug("Raptor: decode failed for source block {} (insufficient symbols)",
+                    srcblk.id);
+    }
   }
-  DecoderCtx& ctx = it->second;
-  if (ctx.decoded) {
-    return true;
-  }
-  // TryDecode may legitimately return false if not enough symbols are
-  // in yet. The receiver loop will call us again as more arrive.
-  if (ctx.dec->TryDecode()) {
-    ctx.decoded = true;
-    return true;
-  }
-  return false;
+  return any_decoded;
 }
 
 void LibFlute::RaptorFEC::extract_finished_block(LibFlute::SourceBlock& srcblk,
@@ -211,17 +230,18 @@ void LibFlute::RaptorFEC::extract_finished_block(LibFlute::SourceBlock& srcblk,
     return;
   }
   // First symbol's data pointer is the start of the block in the
-  // file buffer (create_blocks lays out symbols at sbn*K*T + i*T).
-  std::byte* dst = reinterpret_cast<std::byte*>(srcblk.symbols.begin()->second.data);
+  // file buffer (create_blocks lays out symbols at
+  // block_byte_offset(sbn) + i*T).
+  std::byte* dst = reinterpret_cast<std::byte*>(srcblk.symbols.front().data);
   const auto src = ctx.dec->SourceBlock();
   std::memcpy(dst, src.data(), ctx.block_size);
   spdlog::debug("Raptor Decoder: extracted decoded source block {} ({} bytes)",
                 srcblk.id, ctx.block_size);
 }
 
-bool LibFlute::RaptorFEC::extract_file(std::map<uint32_t, SourceBlock> blocks) {
-  for (auto& [sbn, srcblk] : blocks) {
-    auto it = _dec_ctxs.find(static_cast<std::uint16_t>(sbn));
+bool LibFlute::RaptorFEC::extract_file(std::vector<SourceBlock>& blocks) {
+  for (auto& srcblk : blocks) {
+    auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
     if (it == _dec_ctxs.end()) continue;
     extract_finished_block(srcblk, it->second);
   }
@@ -285,18 +305,21 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
   }
 
   const unsigned int symbols_to_emit = target_K(blockid);
+  source_block.symbols.reserve(symbols_to_emit);
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
-    LibFlute::Symbol sym{ new char[T], T };
+    LibFlute::Symbol sym{};
+    sym.data   = new char[T];
+    sym.length = T;
     enc->EncodeSymbol(esi,
                       std::span<std::byte>(
                           reinterpret_cast<std::byte*>(sym.data), T));
-    source_block.symbols[esi] = sym;
+    source_block.symbols.push_back(sym);
   }
   *bytes_read += blocksize;
   return source_block;
 }
 
-std::map<uint32_t, LibFlute::SourceBlock>
+std::vector<LibFlute::SourceBlock>
 LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
   if (!bytes_read) {
     throw std::invalid_argument("bytes_read pointer shouldn't be null");
@@ -306,7 +329,8 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
         "Currently the encoding only supports 1 sub-block per block");
   }
 
-  std::map<uint32_t, LibFlute::SourceBlock> block_map;
+  std::vector<LibFlute::SourceBlock> block_vec;
+  block_vec.reserve(Z);
   *bytes_read = 0;
 
   for (unsigned int sbn = 0; sbn < Z; ++sbn) {
@@ -314,27 +338,25 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
       // Receiver lays out one Symbol per slot at the §4.4.1.2 block
       // offset; process_symbol fills these in as packets arrive and
       // extract_finished_block writes the recovered source block
-      // back over them. The slot offset is block_byte_offset(sbn) +
-      // i*T — using `sbn * K * T` (the old layout) misplaces blocks
-      // beyond ZL when KL ≠ KS.
+      // back over them.
       LibFlute::SourceBlock block;
+      block.id = sbn;
       const unsigned long blk_off        = block_byte_offset(sbn);
       const unsigned int  symbols_to_read = target_K(sbn);
+      block.symbols.reserve(symbols_to_read);
       for (unsigned int i = 0; i < symbols_to_read; ++i) {
-        block.symbols[i] = Symbol{
-            .data = buffer + blk_off + static_cast<unsigned long>(i) * T,
-            .length = T,
-            .complete = false,
-        };
+        LibFlute::Symbol sym{};
+        sym.data     = buffer + blk_off + static_cast<unsigned long>(i) * T;
+        sym.length   = T;
+        block.symbols.push_back(sym);
       }
-      block.id = sbn;
-      block_map[sbn] = block;
+      block_vec.push_back(std::move(block));
     } else {
-      block_map[sbn] = create_block(buffer + block_byte_offset(sbn),
-                                     bytes_read, sbn);
+      block_vec.push_back(create_block(buffer + block_byte_offset(sbn),
+                                         bytes_read, sbn));
     }
   }
-  return block_map;
+  return block_vec;
 }
 
 bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {

@@ -18,7 +18,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <map>
+#include <vector>
 #include "tinyxml2.h"
 #include "flute_types.h"
 
@@ -48,9 +48,10 @@ namespace LibFlute {
      *
      * @param buffer a pointer to the buffer containing the data
      * @param bytes_read a pointer to an integer to store the number of bytes read out of buffer
-     * @return a map of source blocks that the object has been encoded to
+     * @return a vector of source blocks indexed by SBN. SBN is dense
+     *         (0..Z-1) so a vector is the natural fit.
      */
-    virtual std::map<uint32_t, SourceBlock> create_blocks(char *buffer, int *bytes_read) = 0;
+    virtual std::vector<SourceBlock> create_blocks(char *buffer, int *bytes_read) = 0;
 
     /**
      * @brief Process a received symbol
@@ -91,7 +92,23 @@ namespace LibFlute {
        *
        * @param blocks the source blocks of the file, stored in the File object
        */
-    virtual bool extract_file(std::map<uint32_t, SourceBlock> blocks) = 0;
+    virtual bool extract_file(std::vector<SourceBlock>& blocks) = 0;
+
+    /**
+     * @brief Trigger decode for every source block that has accumulated
+     *        enough received symbols. Called once when the receiver
+     *        decides the file's transmission has ended (e.g. the FDT
+     *        no longer lists this file's TOI). Schemes that don't
+     *        require a decode pass — CompactNoCode in particular —
+     *        leave this as a no-op; the per-symbol path already
+     *        flagged the source blocks complete as data arrived.
+     *
+     * @return true if at least one previously-undecoded block was
+     *         decoded by this call.
+     */
+    virtual bool try_decode_pending(std::vector<SourceBlock>& /*blocks*/) {
+      return false;
+    }
 
     uint32_t nof_source_symbols = 0;
     uint32_t nof_source_blocks = 0;

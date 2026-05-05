@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "fec/FecTransformer.h"
 #include "flute_types.h"
@@ -76,9 +77,11 @@ namespace LibFlute {
 
       bool check_source_block_completion(SourceBlock& srcblk) override;
 
-      std::map<uint32_t, SourceBlock> create_blocks(char *buffer, int *bytes_read) override;
+      std::vector<SourceBlock> create_blocks(char *buffer, int *bytes_read) override;
 
       bool process_symbol(LibFlute::SourceBlock& srcblk, LibFlute::Symbol& symb, unsigned int id) override;
+
+      bool try_decode_pending(std::vector<LibFlute::SourceBlock>& blocks) override;
 
       bool calculate_partitioning() override;
 
@@ -88,7 +91,7 @@ namespace LibFlute {
 
       void *allocate_file_buffer(int min_length) override;
 
-      bool extract_file(std::map<uint32_t, SourceBlock> blocks) override;
+      bool extract_file(std::vector<SourceBlock>& blocks) override;
 
       uint32_t nof_source_symbols = 0;
       uint32_t nof_source_blocks = 0;

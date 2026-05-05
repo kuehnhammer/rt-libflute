@@ -15,7 +15,7 @@
 //
 #include <stddef.h>
 #include <stdint.h>
-#include <map>
+#include <vector>
 #include "tinyxml2.h"
 
 #pragma once
@@ -62,16 +62,26 @@ namespace LibFlute {
   };
 
   struct Symbol {
-    char* data;
-    size_t length;
+    char* data = nullptr;
+    size_t length = 0;
     bool complete = false;
     bool queued = false;
   };
 
+  // SourceBlock holds the symbols for one RFC 5052 source block.
+  // ESIs run densely from 0..symbols.size()-1, so a vector indexed by
+  // ESI is the natural fit — std::map adds per-symbol heap allocation
+  // and O(log K) lookup with no upside (the keys are dense integers).
+  // For Raptor, slots [0, K) hold source symbols and [K, target_K)
+  // hold repair symbols; for CompactNoCode there are no repair slots.
+  // emit_cursor is a per-block hint used by File::get_next_symbols to
+  // avoid O(K²) scans when emitting all symbols of a block one packet
+  // at a time.
   struct SourceBlock {
     uint32_t id = 0;
     bool complete = false;
-    std::map<uint32_t, Symbol> symbols;
+    std::vector<Symbol> symbols;
+    uint32_t emit_cursor = 0;
   };
 
   struct FecOti {

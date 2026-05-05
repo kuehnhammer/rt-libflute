@@ -150,7 +150,7 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
     throw std::runtime_error("Source Block number too high");
   }
 
-  SourceBlock& source_block = _source_blocks[ symbol.source_block_number() ];
+  SourceBlock& source_block = _source_blocks[symbol.source_block_number()];
 
   if (source_block.complete) {
     // Bonus / repair symbols arriving after the source block was
@@ -186,12 +186,14 @@ auto LibFlute::File::check_source_block_completion( SourceBlock& block ) -> void
     block.complete = _meta.fec_transformer->check_source_block_completion(block);
     return;
   }
-  block.complete = std::all_of(block.symbols.begin(), block.symbols.end(), [](const auto& symbol){ return symbol.second.complete; });
+  block.complete = std::all_of(block.symbols.begin(), block.symbols.end(),
+                                [](const auto& sym) { return sym.complete; });
 }
 
 auto LibFlute::File::check_file_completion() -> void
 {
-  _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(), [](const auto& block){ return block.second.complete; });
+  _complete = std::all_of(_source_blocks.begin(), _source_blocks.end(),
+                            [](const auto& block) { return block.complete; });
 
   if (_complete && !_meta.content_md5.empty()) {
       if(_meta.fec_transformer){
@@ -232,75 +234,124 @@ auto LibFlute::File::create_blocks() -> void
     return;
   }
 
+  // CompactNoCode: SBN runs 0..nof_source_blocks-1, dense, so reserve
+  // up front and emplace_back. Each SourceBlock carries a vector of
+  // symbols whose data pointers reference into the user buffer (no
+  // copy).
+  _source_blocks.reserve(_nof_source_blocks);
   auto* buffer_ptr = _buffer;
   size_t remaining_size = _meta.fec_oti.transfer_length;
-  uint32_t number = 0;
-  while (remaining_size > 0) {
+  for (uint32_t number = 0;
+       number < _nof_source_blocks && remaining_size > 0;
+       ++number) {
     LibFlute::SourceBlock block;
-    uint32_t symbol_id = 0;
-    uint32_t block_length = (number < _nof_large_source_blocks)
-                                ? _large_source_block_length
-                                : _small_source_block_length;
+    block.id = number;
+    const uint32_t block_length = (number < _nof_large_source_blocks)
+                                    ? _large_source_block_length
+                                    : _small_source_block_length;
+    block.symbols.reserve(block_length);
 
-    for (uint32_t i = 0; i < block_length; i++) {
-      auto symbol_length = std::min(remaining_size, (size_t)_meta.fec_oti.encoding_symbol_length);
+    for (uint32_t i = 0; i < block_length; ++i) {
+      const size_t symbol_length =
+          std::min(remaining_size, (size_t)_meta.fec_oti.encoding_symbol_length);
       assert(buffer_ptr + symbol_length <= _buffer + _meta.fec_oti.transfer_length);
 
-      LibFlute::Symbol symbol{ .data = buffer_ptr, .length = symbol_length, .complete = false};
-      block.symbols[ symbol_id++ ] = symbol;
-      
+      block.symbols.push_back(LibFlute::Symbol{
+          .data     = buffer_ptr,
+          .length   = symbol_length,
+          .complete = false,
+      });
+
       remaining_size -= symbol_length;
-      buffer_ptr += symbol_length;
-      
-      if (remaining_size <= 0) { 
-        break;
-      }
+      buffer_ptr     += symbol_length;
+      if (remaining_size <= 0) break;
     }
-    _source_blocks[number++] = block;
+    _source_blocks.push_back(std::move(block));
   }
 }
 
-auto LibFlute::File::get_next_symbols(size_t max_size) -> std::vector<EncodingSymbol> 
+auto LibFlute::File::get_next_symbols(size_t max_size) -> std::vector<EncodingSymbol>
 {
-  int nof_symbols = std::floor((float)max_size / (float)_meta.fec_oti.encoding_symbol_length);
-  auto cnt = 0;
+  const int nof_symbols = std::floor(
+      (float)max_size / (float)_meta.fec_oti.encoding_symbol_length);
+  int cnt = 0;
   std::vector<EncodingSymbol> symbols;
-  spdlog::debug("Attempting to queue {} symbols",nof_symbols);
-  for (auto& block : _source_blocks) {
-    if (cnt >= nof_symbols) {
-      break;
-    }
+  spdlog::debug("Attempting to queue {} symbols", nof_symbols);
 
-    if (!block.second.complete) {
-      for (auto& symbol : block.second.symbols) {
-        if (cnt >= nof_symbols) {
-          break;
-        }
-    
-        if (!symbol.second.complete && !symbol.second.queued) {
-          symbols.emplace_back(symbol.first, block.first, symbol.second.data, symbol.second.length, _meta.fec_oti.encoding_id);
-          symbol.second.queued = true;
-          cnt++;
-        }
+  // Vector indexed by SBN. _emit_cursor_sbn is the next block to try;
+  // SourceBlock::emit_cursor is the next ESI within that block. Both
+  // advance forward only — net cost is O(symbols emitted), not O(Z²)
+  // or O(K²) per block.
+  while (_emit_cursor_sbn < _source_blocks.size() && cnt < nof_symbols) {
+    auto& blk = _source_blocks[_emit_cursor_sbn];
+    if (blk.complete) {
+      ++_emit_cursor_sbn;
+      continue;
+    }
+    while (blk.emit_cursor < blk.symbols.size() && cnt < nof_symbols) {
+      auto& sym = blk.symbols[blk.emit_cursor];
+      if (!sym.complete && !sym.queued) {
+        symbols.emplace_back(blk.emit_cursor, blk.id, sym.data, sym.length,
+                              _meta.fec_oti.encoding_id);
+        sym.queued = true;
+        ++cnt;
       }
+      ++blk.emit_cursor;
+    }
+    if (blk.emit_cursor >= blk.symbols.size()) {
+      ++_emit_cursor_sbn;
+    } else {
+      break;  // hit nof_symbols cap mid-block; resume here next call
     }
   }
   return symbols;
+}
 
+auto LibFlute::File::try_decode_pending() -> void
+{
+  if (!_meta.fec_transformer) {
+    return;  // CompactNoCode: nothing to do, completion already tracked.
+  }
+  if (_meta.fec_transformer->try_decode_pending(_source_blocks)) {
+    // At least one source block decoded successfully; re-run file-
+    // level completion check so the caller can dispatch the file.
+    check_file_completion();
+    if (_complete && _meta.fec_transformer) {
+      _meta.fec_transformer->extract_file(_source_blocks);
+    }
+  }
 }
 
 auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, bool success) -> void
 {
   for (const auto& symbol : symbols) {
-    auto block = _source_blocks.find(symbol.source_block_number());
-    if (block != _source_blocks.end()) {
-      auto sym = block->second.symbols.find(symbol.id());
-      if (sym != block->second.symbols.end()) {
-        sym->second.queued = false;
-        sym->second.complete = success;
+    if (symbol.source_block_number() >= _source_blocks.size()) continue;
+    auto& block = _source_blocks[symbol.source_block_number()];
+    if (symbol.id() < block.symbols.size()) {
+      auto& sym = block.symbols[symbol.id()];
+      sym.queued = false;
+      sym.complete = success;
+    }
+    check_source_block_completion(block);
+    check_file_completion();
+  }
+  if (!success && !symbols.empty()) {
+    // Dispatch failed: the symbols are no longer queued. Rewind both
+    // cursors so the next get_next_symbols re-finds them.
+    uint32_t min_sbn = symbols.front().source_block_number();
+    uint32_t min_esi = symbols.front().id();
+    for (const auto& s : symbols) {
+      if (s.source_block_number() < min_sbn) {
+        min_sbn = s.source_block_number();
+        min_esi = s.id();
+      } else if (s.source_block_number() == min_sbn && s.id() < min_esi) {
+        min_esi = s.id();
       }
-      check_source_block_completion(block->second);
-      check_file_completion();
+    }
+    _emit_cursor_sbn = std::min(_emit_cursor_sbn, min_sbn);
+    if (min_sbn < _source_blocks.size()) {
+      auto& blk = _source_blocks[min_sbn];
+      blk.emit_cursor = std::min(blk.emit_cursor, min_esi);
     }
   }
 }

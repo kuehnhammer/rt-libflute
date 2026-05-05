@@ -195,6 +195,20 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
               _stats.fdts_rejected_expired.fetch_add(1,
                                                        std::memory_order_relaxed);
             } else {
+              // Capture old-FDT TOI set BEFORE replacing _fdt; TOIs in
+              // the old set but not the new are "abandoned" — the
+              // sender has stopped emitting symbols for them, so the
+              // FEC layer should attempt a final decode pass with
+              // whatever symbols arrived. RFC 6726 §3.3 ¶5 says the
+              // file itself stays in file_list; only the decode
+              // trigger fires.
+              std::vector<std::uint32_t> old_tois;
+              if (_fdt) {
+                for (const auto& fe : _fdt->file_entries()) {
+                  old_tois.push_back(fe.toi);
+                }
+              }
+
               _fdt = std::move(candidate);
               _stats.fdts_accepted.fetch_add(1, std::memory_order_relaxed);
               for (const auto& file_entry : _fdt->file_entries()) {
@@ -204,6 +218,37 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
                                 file_entry.content_type);
                   _files.emplace(file_entry.toi,
                                  std::make_shared<File>(file_entry));
+                }
+              }
+
+              // Build the abandoned-TOI set and trigger a decode pass
+              // on each one.
+              std::vector<std::uint32_t> new_tois;
+              for (const auto& fe : _fdt->file_entries()) {
+                new_tois.push_back(fe.toi);
+              }
+              for (auto t : old_tois) {
+                bool still_listed = false;
+                for (auto n : new_tois) {
+                  if (n == t) { still_listed = true; break; }
+                }
+                if (still_listed) continue;
+                auto fit = _files.find(t);
+                if (fit == _files.end()) continue;
+                auto& file = fit->second;
+                if (file->complete()) continue;
+                spdlog::debug("FDT no longer lists TOI {}; "
+                              "triggering end-of-transmission decode",
+                              t);
+                file->try_decode_pending();
+                if (file->complete()) {
+                  _stats.files_completed.fetch_add(
+                      1, std::memory_order_relaxed);
+                  if (_completion_cb && completed_file == nullptr) {
+                    completed_file    = file;
+                    callback_snapshot = _completion_cb;
+                    _files.erase(fit);
+                  }
                 }
               }
             }

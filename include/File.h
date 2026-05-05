@@ -17,7 +17,6 @@
 
 #include <stddef.h>             // for size_t
 #include <stdint.h>             // for uint32_t, uint16_t, uint64_t
-#include <map>                  // for map
 #include <string>               // for string
 #include <vector>               // for vector
 #include "FileDeliveryTable.h"  // for FileDeliveryTable, FileDeliveryTable:...
@@ -119,6 +118,17 @@ namespace LibFlute {
       void mark_completed(const std::vector<EncodingSymbol>& symbols, bool success);
 
      /**
+      *  End-of-transmission decode trigger. The FLUTE layer calls this
+      *  when it determines the file's transmission has ended (e.g. the
+      *  FDT no longer lists this file's TOI). For FEC schemes that
+      *  defer the decode pass — Raptor in particular — this is the
+      *  cue to actually run TryDecode once per source block. For
+      *  CompactNoCode the call is a no-op (the per-symbol path
+      *  already flagged the source blocks complete as data arrived).
+      */
+      void try_decode_pending();
+
+     /**
       *  Set the FDT instance ID
       */
       void set_fdt_instance_id( uint16_t id) { _fdt_instance_id = id; };
@@ -135,7 +145,11 @@ namespace LibFlute {
       void check_source_block_completion(SourceBlock& block);
       void check_file_completion();
 
-      std::map<uint32_t, LibFlute::SourceBlock> _source_blocks;
+      // Vector indexed by SBN. SBN runs densely from 0..Z-1, so
+      // std::map adds O(log Z) lookup + per-block heap allocation
+      // for no upside. Resized once in create_blocks(); never grown
+      // after.
+      std::vector<LibFlute::SourceBlock> _source_blocks;
 
       bool _complete = false;
 
@@ -153,6 +167,15 @@ namespace LibFlute {
       unsigned _access_count = 0;
 
       uint16_t _fdt_instance_id = 0;
+
+      // Forward-only cursor used by get_next_symbols(). Without this,
+      // each call would re-iterate _source_blocks from begin() to find
+      // the first non-complete block — for files with thousands of
+      // blocks that's quadratic in (blocks × packets). The cursor is
+      // a SBN hint; lower_bound positions the iterator in O(log Z).
+      // mark_completed(success=false) rewinds it so a dispatch retry
+      // can re-emit symbols that were previously queued.
+      uint32_t _emit_cursor_sbn = 0;
   };
 
   /**
