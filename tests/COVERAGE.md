@@ -278,6 +278,65 @@ that defer dispatch (queue + drain async) must copy the bytes.
 sendto/sendmsg-style synchronous consumers — the targeted shape —
 just dispatch the span as-is.
 
+Round-10 results (Release, mtu=1500), median of three runs:
+
+| F | FEC | R8 | **R10** | Δ |
+|---|---|---|---|---|
+| 10 MB  | CompactNoCode | 452 MB/s | 486 MB/s | +8 % |
+| 10 MB  | Raptor        |  66 MB/s |  98 MB/s | +48 % |
+| 100 MB | CompactNoCode | 436 MB/s | **511 MB/s** | +17 % |
+| 100 MB | Raptor        | 112 MB/s | **189 MB/s** | +69 % |
+| 500 MB | CompactNoCode | 302 MB/s | **513 MB/s** | +70 % |
+| 500 MB | Raptor        | 117 MB/s | **203 MB/s** | +73 % |
+
+Round-10 stacked four independent changes:
+
+1. **Per-block encoder scratch on RaptorFEC.** Replaced
+   K_target × `new char[T]` with one allocation per block (laid out
+   as K source slots + (target_K − K) repair slots). Repair
+   EncodeSymbol writes into the slot directly; source ESIs skip
+   EncodeSymbol entirely (LT(i) for i<K is the source byte
+   verbatim). Scratch lives on RaptorFEC, not SourceBlock — the
+   first attempt grew SourceBlock 40 → 64 bytes and tanked
+   CompactNoCode by 22 % at 5600 blocks of cache traffic.
+
+2. **O(1) source-block + file completion via transition counters.**
+   `mark_completed` previously did `std::all_of` over the symbols
+   vector (O(K_target) per packet × packets/block ⇒ O(K_target²)
+   per block) and `check_file_completion` did `std::all_of` over
+   the source-blocks vector (O(Z²) over a full encode). Replace
+   with monotone counters bumped exactly once per false→true
+   transition. Single largest win in round 10 — 500 MB
+   CompactNoCode jumped 302 → 507 MB/s.
+
+3. **Lazy per-block scratch fill on the Raptor encoder.** Move
+   from "fill all Z blocks at File construction" to "fill block N
+   only when File::get_next_symbols enters it for the first time"
+   via a new `FecTransformer::prepare_for_emit` hook. Single
+   shared scratch reused across blocks; peak encoder memory drops
+   from O(Z × K_max × T) to O(K_max × T) (~13 MB at K_target=9200,
+   T=1424). +3–4 % on Raptor end-to-end.
+
+4. **Lossless decoder short-circuit in bitstem-r10.** When every
+   source ESI is present in the receive set, `Decoder::TryDecode`
+   skips the matrix-inversion + LT-recompute pipeline and
+   delivers the source block by permuting the receive buffer by
+   ESI. RFC 5053 §5.4.4.3: LT(i) for i<K is the source symbol
+   verbatim, so any compliant decoder is allowed to short-circuit
+   here. For HLS/DASH segment delivery and in-process round-trips
+   (bench shape) the lossless path is universal; full matrix-
+   inversion stack remains in place for any-source-loss cases.
+   Largest single decoder win — 500 MB Raptor decoder time
+   ≈2.05 s → ≈0.79 s. End-to-end +51 %.
+
+Top remaining cost (per `perf record` after R10): encoder time
+1.69 s on 500 MB Raptor is mostly per-packet AlcPacket assembly
+(414 k packets × ~4 µs each = ~1.65 s). The visitor-pipeline
+sketch ("striped scratch with header pad in front of each symbol
+slot, dispatch packets directly out of scratch") would save the
+per-packet symbol memcpy (~50 ms / 100 MB = ≤5 %) — not enough to
+justify the AlcPacket lifecycle disruption. Parked.
+
 ### `tests/unit/integration_test.cpp` — TX→RX round-trip
 
 End-to-end. Encoder emits ALC packet bytes via its PacketCallback;
