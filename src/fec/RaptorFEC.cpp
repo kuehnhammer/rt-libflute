@@ -26,6 +26,7 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include <tinyxml2.h>
 
@@ -315,7 +316,9 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
                           reinterpret_cast<std::byte*>(sym.data), T));
     source_block.symbols.push_back(sym);
   }
-  *bytes_read += blocksize;
+  if (bytes_read != nullptr) {
+    *bytes_read += blocksize;
+  }
   return source_block;
 }
 
@@ -329,17 +332,22 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
         "Currently the encoding only supports 1 sub-block per block");
   }
 
-  std::vector<LibFlute::SourceBlock> block_vec;
-  block_vec.reserve(Z);
+  std::vector<LibFlute::SourceBlock> block_vec(Z);
   *bytes_read = 0;
 
+  // Single-threaded block emission. Per-block work used to be
+  // dominated by bitstem::r10::Encoder::Create's schedule
+  // construction (~5–70 ms at K=8000), but as of bitstem-r10 commit
+  // 281aeea that schedule is process-cached by K, so the second-and-
+  // later same-K block in a file pays only the data-dependent
+  // ApplyDecodingSchedule + EncodeSymbol cost. For HLS/DASH-style
+  // sessions where every segment shares the same K, the cache also
+  // eats the cost across files. Parallelism across SBN gives marginal
+  // additional speedup once the cache is in place; revisit if a
+  // workload shows up where it actually moves the needle.
   for (unsigned int sbn = 0; sbn < Z; ++sbn) {
     if (!is_encoder) {
-      // Receiver lays out one Symbol per slot at the §4.4.1.2 block
-      // offset; process_symbol fills these in as packets arrive and
-      // extract_finished_block writes the recovered source block
-      // back over them.
-      LibFlute::SourceBlock block;
+      auto& block = block_vec[sbn];
       block.id = sbn;
       const unsigned long blk_off        = block_byte_offset(sbn);
       const unsigned int  symbols_to_read = target_K(sbn);
@@ -350,10 +358,9 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
         sym.length   = T;
         block.symbols.push_back(sym);
       }
-      block_vec.push_back(std::move(block));
     } else {
-      block_vec.push_back(create_block(buffer + block_byte_offset(sbn),
-                                         bytes_read, sbn));
+      block_vec[sbn] = create_block(buffer + block_byte_offset(sbn),
+                                     bytes_read, sbn);
     }
   }
   return block_vec;

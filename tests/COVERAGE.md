@@ -157,6 +157,20 @@ operators.
 | `DecoderStats.EvictedIncompleteFileCountsAsDiscarded` | files/bytes_discarded_incomplete bumped on eviction | active (round-6) |
 | `DecoderStats.RaptorLossyRoundTripDistinguishesSourceVsRepair` | source_symbols_received vs repair_symbols_received split correctly under loss | active (round-6, gated on RAPTOR_ENABLED) |
 
+### `tests/bench/schedule_size.cpp` — bitstem-r10 schedule-cache sizing probe
+
+One-shot diagnostic that prints `DecodingSchedule` size (c[] + ops[])
+across representative K values. Used during round-8 design to size
+the encoder cache. Built only with `-DLIBFLUTE_BUILD_BENCH=ON`.
+
+| K | per-entry bytes |
+|---|---|
+| 10 | 1.7 KB |
+| 100 | 21 KB |
+| 1024 | 350 KB |
+| 4097 | 2.0 MB |
+| 8192 | 5.6 MB |
+
 ### `tests/bench/flute_bench.cpp` — end-to-end perf benchmark
 
 Not a gtest target; built only with `-DLIBFLUTE_BUILD_BENCH=ON`.
@@ -202,11 +216,45 @@ individually before the next was added):
      loop O(emitted) instead of O(K²). This was the dominant win —
      CompactNoCode 500 MB went 29 s → 1.1 s.
 
-Raptor still encoder-bound at 90 MB/s (~3.4 s to build 500 MB worth
-of repair symbols; bitstem-r10's Encoder::Create per source block is
-the next bottleneck — same inactivation-decoder schedule cost the
-decoder used to pay, just on the TX side). Future round-8
-optimization candidate.
+Round-8 results (Release, mtu=1500), after the bitstem-r10
+per-K encoder schedule cache (commit 281aeea in lib/raptor):
+
+| F | FEC | R7 | **R8** | Δ |
+|---|---|---|---|---|
+| 10 MB  | CompactNoCode | 461 MB/s | 452 MB/s | flat |
+| 10 MB  | Raptor        |  72 MB/s |  66 MB/s | flat (single-block; no cache hit) |
+| 100 MB | CompactNoCode | 428 MB/s | 436 MB/s | flat |
+| 100 MB | Raptor        |  85 MB/s | **112 MB/s** | +32 % |
+| 500 MB | CompactNoCode | 283 MB/s | 302 MB/s | flat |
+| 500 MB | Raptor        |  90 MB/s | **117 MB/s** | +30 % |
+
+Cache mechanism: bitstem-r10's `fast::Encoder::Create` consults a
+process-wide `unordered_map<uint16_t, DecodingSchedule>` keyed by K.
+First call for a given K computes the pre-coding matrix +
+inactivation schedule (~5–70 ms at K=8000) and stores it; later
+calls skip straight to the data-dependent path
+(`ApplyDecodingSchedule` over the d-buffer). For multi-block files
+all blocks share K (or differ by 1 per RFC 5053 §4.4.1.2), so the
+cache hits ~99 % within a single encode. Across files in a session
+(HLS / DASH segments) every encoder gets a hit on the first call.
+
+Per-entry size: ~600 × K bytes — 5.6 MB at K=8192 — bounded by the
+caller's K-distribution, which is typically a single value in
+production. See bitstem-r10 commit 281aeea + tests/unit/encoder_-
+schedule_cache_test.cpp for the cache impl + correctness proofs.
+
+Single-block Raptor files (Z=1) get no cache benefit — there's only
+one Create() per file. Bench's 10 MB / Raptor case is Z=1 and stays
+flat at ~70 MB/s. Multi-block files (Z>1) and multi-file sessions
+get the full speedup.
+
+Parallelism across SBN was tried on top of the cache and gave only
+marginal additional gains (the cache already eliminates the
+schedule-construction cost; what's left is data-dependent and
+parallelises less cleanly given std::thread spawn overhead). Per
+the perf workload assumption (single-threaded HLS/DASH in a k8s
+core), parallelism is not added in round 8. Future round if a
+real workload shows up where parallel encode moves the needle.
 
 ### `tests/unit/integration_test.cpp` — TX→RX round-trip
 
