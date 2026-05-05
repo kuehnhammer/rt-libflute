@@ -285,9 +285,9 @@ Round-10 results (Release, mtu=1500), median of three runs:
 | 10 MB  | CompactNoCode | 452 MB/s | 486 MB/s | +8 % |
 | 10 MB  | Raptor        |  66 MB/s |  98 MB/s | +48 % |
 | 100 MB | CompactNoCode | 436 MB/s | **511 MB/s** | +17 % |
-| 100 MB | Raptor        | 112 MB/s | **189 MB/s** | +69 % |
+| 100 MB | Raptor        | 112 MB/s | **197 MB/s** | +76 % |
 | 500 MB | CompactNoCode | 302 MB/s | **513 MB/s** | +70 % |
-| 500 MB | Raptor        | 117 MB/s | **203 MB/s** | +73 % |
+| 500 MB | Raptor        | 117 MB/s | **219 MB/s** | +87 % |
 
 Round-10 stacked four independent changes:
 
@@ -328,6 +328,49 @@ Round-10 stacked four independent changes:
    inversion stack remains in place for any-source-loss cases.
    Largest single decoder win — 500 MB Raptor decoder time
    ≈2.05 s → ≈0.79 s. End-to-end +51 %.
+
+Round-10 step 5 (refinement to step 4): receiver-side early decode
+at `source_esi_count == K`. The lossless short-circuit was inside
+`Decoder::TryDecode`, but `TryDecode` itself was only called at
+FDT-end-of-transmission. Generalise: RaptorFEC fires `TryDecode`
+the moment every source ESI for a block has arrived, regardless of
+whether the FDT has rolled over yet. The post-K repair stream then
+falls through `put_symbol`'s `block.complete` early-return.
+
+Two false starts here, both informative:
+- *Trigger on `completed_symbol_count >= K+1`*. Catches lossless
+  one packet later (= first repair) AND fires the matrix factor
+  for lossy blocks mid-stream. Bench at drop_every=8000 (1 source
+  loss per block) showed +13 % wall regression on lossy because
+  the ~58 ms-per-block factor competes with concurrent encoder
+  work for cache + TLB. Total CPU work was identical to FDT-batch.
+- *Trigger on `source_esi_count == K`* (the kept design). Fires
+  exactly when the lossless short-circuit is guaranteed
+  applicable; never invokes mid-stream matrix work. Lossy blocks
+  defer to the FDT-trigger as before.
+
+500 MB Raptor (median of three, lossless): 203 → 219 MB/s (+8 %)
+just from this trigger refinement. Lossy (1in8000) holds at
+138 MB/s — same as deferring the matrix factor entirely, since
+that's exactly what happens for lossy blocks under this trigger.
+
+Lossy benchmark coverage added in step 5: `FLUTE_BENCH_DROP_EVERY=N`
+drops every Nth file packet (TOI ≠ 0). At drop_every=8000 we drop
+~1 source ESI per source block, which prevents the lossless short-
+circuit and exercises the FDT-trigger matrix-factor batch path.
+
+| F | FEC | mode | throughput | encoder | decoder |
+|---|---|---|---|---|---|
+| 10 MB  | Raptor | lossless | 106 MB/s | 80 ms | 14 ms |
+| 10 MB  | Raptor | 1in8000  | 206 MB/s | 43 ms |  6 ms |
+| 100 MB | Raptor | lossless | 197 MB/s | 409 ms | 97 ms |
+| 100 MB | Raptor | 1in8000  | 131 MB/s | 304 ms | 459 ms |
+| 500 MB | Raptor | lossless | 219 MB/s | 1797 ms | 483 ms |
+| 500 MB | Raptor | 1in8000  | 138 MB/s | 1510 ms | 2008 ms |
+
+The lossy decoder time (~58 ms × Z blocks of matrix factor at
+FDT-trigger) is the dominant cost when the lossless short-circuit
+can't fire — fundamental Raptor matrix-inversion work, not glue.
 
 Top remaining cost (per `perf record` after R10): encoder time
 1.69 s on 500 MB Raptor is mostly per-packet AlcPacket assembly
