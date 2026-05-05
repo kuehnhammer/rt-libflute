@@ -22,6 +22,12 @@
 //                                      // (TOI ≠ 0). Exercises Raptor's
 //                                      // repair path; CompactNoCode would
 //                                      // fail to reassemble. 0 = no drops.
+//   FLUTE_BENCH_NO_DECODE=1            // make the encoder's PacketCallback
+//                                      // a no-op (skip decoder.feed_packet).
+//                                      // Isolates pure encoder wall-clock.
+//                                      // The bench will report
+//                                      // ROUND-TRIP FAILED but encoder time
+//                                      // is the meaningful number.
 
 #include <chrono>
 #include <cstdint>
@@ -92,7 +98,8 @@ const char* FecName(LibFlute::FecScheme s) {
 }
 
 ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
-                              unsigned mtu, int drop_every = 0) {
+                              unsigned mtu, int drop_every = 0,
+                              bool no_decode = false) {
     ScenarioResult r;
     r.F   = F;
     r.fec = fec;
@@ -113,6 +120,14 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
     LibFlute::Encoder encoder(
         /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
         [&](std::span<const std::uint8_t> packet) -> bool {
+            // FLUTE_BENCH_NO_DECODE: short-circuit the lambda entirely.
+            // Used to isolate encoder pure wall-clock from any decoder-
+            // side timing. The receiver never sees the packets, so
+            // round-trip verification fails — that's expected; only
+            // the encoder column is meaningful in this mode.
+            if (no_decode) {
+                return true;
+            }
             // Lossy path: drop every Nth file packet (TOI != 0).
             // FDT packets always pass — without the FDT the
             // receiver can't decode metadata. Loss is deterministic
@@ -175,6 +190,19 @@ void PrintRow(const ScenarioResult& r) {
                        "1in%d", r.drop_every);
     }
     if (!r.ok) {
+        // In FLUTE_BENCH_NO_DECODE mode the receiver never sees
+        // packets, so round-trip will fail; print encoder timing
+        // anyway since that's the meaningful column for that mode.
+        if (std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr) {
+            const double mb_nd = static_cast<double>(r.F) /
+                                 (1024.0 * 1024.0);
+            std::printf("%-7.0f  %-13s  %-9s  enc=%.1f ms  "
+                        "dec=%.1f ms  (no-decode mode)\n",
+                        mb_nd, FecName(r.fec), loss_label,
+                        DurationMs(r.encoder_time),
+                        DurationMs(r.decoder_time));
+            return;
+        }
         std::printf("%-7.0f  %-13s  %-9s  ROUND-TRIP FAILED (%zu drops)\n",
                     static_cast<double>(r.F) / (1024.0 * 1024.0),
                     FecName(r.fec), loss_label, r.dropped_count);
@@ -237,18 +265,21 @@ int main() {
     if (const char* d = std::getenv("FLUTE_BENCH_DROP_EVERY"); d && *d) {
         drop_every = static_cast<int>(std::strtol(d, nullptr, 10));
     }
+    const bool no_decode = std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr;
 
     PrintHeader(mtu);
     for (auto F : ParseSizesEnv()) {
-        auto r = RunScenario(F, LibFlute::FecScheme::CompactNoCode, mtu);
+        auto r = RunScenario(F, LibFlute::FecScheme::CompactNoCode, mtu,
+                              0, no_decode);
         PrintRow(r);
 #ifdef RAPTOR_ENABLED
         if (!skip_raptor) {
-            auto rr = RunScenario(F, LibFlute::FecScheme::Raptor, mtu);
+            auto rr = RunScenario(F, LibFlute::FecScheme::Raptor, mtu,
+                                  0, no_decode);
             PrintRow(rr);
             if (drop_every > 0) {
                 auto rl = RunScenario(F, LibFlute::FecScheme::Raptor,
-                                      mtu, drop_every);
+                                      mtu, drop_every, no_decode);
                 PrintRow(rl);
             }
         }
