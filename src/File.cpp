@@ -301,6 +301,16 @@ auto LibFlute::File::get_next_symbols(size_t max_size) -> std::vector<EncodingSy
       ++_emit_cursor_sbn;
       continue;
     }
+    // Lazy materialisation hook for FEC schemes that defer block fill
+    // (Raptor) — Symbol[0].data == nullptr is the "not yet
+    // materialised" placeholder convention. CompactNoCode + the
+    // Raptor receiver path always populate Symbol::data in
+    // create_blocks() and so skip this check (default no-op
+    // prepare_for_emit). Only triggers once per block per pass.
+    if (_meta.fec_transformer && !blk.symbols.empty() &&
+        blk.symbols[0].data == nullptr) {
+      _meta.fec_transformer->prepare_for_emit(blk);
+    }
     while (blk.emit_cursor < blk.symbols.size() && cnt < nof_symbols) {
       auto& sym = blk.symbols[blk.emit_cursor];
       if (!sym.complete && !sym.queued) {

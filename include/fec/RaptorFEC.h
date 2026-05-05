@@ -57,18 +57,32 @@ namespace LibFlute {
       // calls for the same block.
       std::map<std::uint16_t, DecoderCtx> _dec_ctxs;
 
-      // Encoder-side per-block symbol scratch. One entry per source
-      // block (indexed by SBN); each holds target_K(sbn) * T bytes
-      // laid out as K source slots + (target_K - K) repair slots.
-      // Symbol::data on encoder-side SourceBlocks points into this.
-      // Lives on RaptorFEC rather than on SourceBlock so the
-      // (potentially thousands of) CompactNoCode SourceBlocks stay
-      // small + cache-friendly.
-      std::vector<std::vector<char>> _enc_scratch;
+      // Encoder-side single shared symbol scratch. Holds at most
+      // max(target_K) × T bytes — one source block's worth, laid out
+      // as K source slots followed by (target_K − K) repair slots.
+      // Allocated once on first prepare_for_emit() and reused across
+      // every subsequent block: the encoder emits packets strictly
+      // SBN-ascending, so block N+1 only enters scratch after block
+      // N has fully transmitted (its Symbol::data pointers are
+      // nulled in check_source_block_completion). Peak memory is
+      // O(K_max × T) instead of O(Z × K × T).
+      std::vector<char> _enc_scratch;
+      // SBN currently materialised in _enc_scratch, or -1 if scratch
+      // is empty. Used as a no-op guard if prepare_for_emit() is
+      // re-entered for the same block (shouldn't happen with the
+      // forward-only emit cursor, but cheap insurance).
+      int _enc_scratch_sbn = -1;
+      // User file buffer + length, captured in create_blocks() so
+      // prepare_for_emit() can stripe each block's source bytes into
+      // _enc_scratch on demand without create_blocks having to walk
+      // the whole file up front.
+      char*       _enc_src_buffer = nullptr;
+      std::size_t _enc_src_buffer_len = 0;
 
       // Helpers.
       DecoderCtx& ensure_dec_ctx(std::uint16_t sbn);
-      LibFlute::SourceBlock create_block(char *buffer, int *bytes_read, int blockid);
+      LibFlute::SourceBlock create_block_placeholder(int blockid);
+      void                  fill_block_into_scratch(LibFlute::SourceBlock& srcblk);
       void extract_finished_block(LibFlute::SourceBlock& srcblk, DecoderCtx& ctx);
 
       // 15% repair-symbol overhead; protects against ~15% packet loss.
@@ -91,6 +105,8 @@ namespace LibFlute {
       bool process_symbol(LibFlute::SourceBlock& srcblk, LibFlute::Symbol& symb, unsigned int id) override;
 
       bool try_decode_pending(std::vector<LibFlute::SourceBlock>& blocks) override;
+
+      void prepare_for_emit(LibFlute::SourceBlock& srcblk) override;
 
       bool calculate_partitioning() override;
 

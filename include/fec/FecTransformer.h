@@ -110,6 +110,21 @@ namespace LibFlute {
       return false;
     }
 
+    /**
+     * @brief Encoder-side hook: prepare a source block's Symbols for
+     *        emission. Called by File::get_next_symbols when the
+     *        cursor first enters a block (Symbol[0].data == nullptr
+     *        as the placeholder signal). Schemes that fill all
+     *        scratch eagerly in create_blocks override this as a
+     *        no-op (or leave the default).
+     *
+     *        For Raptor: lazily materialises the block into the FEC's
+     *        single shared scratch buffer (one fill at a time, reused
+     *        across blocks — peak memory is O(K_max × T) rather than
+     *        O(Z × K × T)) and runs EncodeSymbol for the repair ESIs.
+     */
+    virtual void prepare_for_emit(SourceBlock& /*srcblk*/) {}
+
     uint32_t nof_source_symbols = 0;
     uint32_t nof_source_blocks = 0;
     uint32_t large_source_block_length = 0;

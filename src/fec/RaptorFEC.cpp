@@ -166,14 +166,16 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
     const bool complete =
         (srcblk.completed_symbol_count == srcblk.symbols.size());
     if (complete) {
-      // RaptorFEC owns the per-block scratch in _enc_scratch[sbn]
-      // (one allocation per block, set up in create_block). Release
-      // it as a unit — Symbol::data pointers become dangling after
-      // this, which is fine because the block is marked complete
-      // and never re-emits.
-      if (srcblk.id < _enc_scratch.size()) {
-        _enc_scratch[srcblk.id].clear();
-        _enc_scratch[srcblk.id].shrink_to_fit();
+      // _enc_scratch is the FEC's single shared scratch buffer; the
+      // next prepare_for_emit() will overwrite it for the next block.
+      // Just nullify Symbol::data so the placeholder convention
+      // (data == nullptr ↔ block not yet materialised) holds again
+      // — File::get_next_symbols never revisits a complete block,
+      // but other code paths (FDT round-trip diagnostics, future
+      // re-emit logic) read Symbol.data and would see stale pointers
+      // otherwise.
+      if (_enc_scratch_sbn == static_cast<int>(srcblk.id)) {
+        _enc_scratch_sbn = -1;
       }
       for (auto& s : srcblk.symbols) {
         s.data = nullptr;
@@ -267,53 +269,62 @@ unsigned int LibFlute::RaptorFEC::target_K(int blockno) {
   return (target > k) ? target : k + 1;
 }
 
-LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
-                                                         int *bytes_read,
-                                                         int blockid) {
+LibFlute::SourceBlock LibFlute::RaptorFEC::create_block_placeholder(int blockid) {
+  // Build a SourceBlock with target_K Symbol slots whose data
+  // pointers are nullptr — that's the signal File::get_next_symbols
+  // checks to know it should call prepare_for_emit() before reading
+  // any of them. No source-byte copy, no repair-symbol generation,
+  // no Encoder::Create here: those happen lazily in
+  // fill_block_into_scratch().
   struct SourceBlock source_block;
   source_block.id = blockid;
+  const unsigned int symbols_to_emit = target_K(blockid);
+  source_block.symbols.assign(symbols_to_emit, LibFlute::Symbol{});
+  return source_block;
+}
 
-  // Per-block parameters from §4.4.1.2. nsymbs is exact; blocksize
-  // is nsymbs*T except for the very last block when F isn't a clean
-  // multiple of T (the last source symbol then has < T bytes of real
-  // data and is zero-padded below). The caller (create_blocks) has
-  // already advanced `buffer` to block_byte_offset(blockid).
-  const unsigned int  nsymbs    = block_K(static_cast<unsigned int>(blockid));
-  const unsigned long byte_off  = block_byte_offset(static_cast<unsigned int>(blockid));
-  unsigned long       blocksize = static_cast<unsigned long>(nsymbs) * T;
+void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk) {
+  if (_enc_src_buffer == nullptr) {
+    throw std::runtime_error(
+        "RaptorFEC::fill_block_into_scratch called before create_blocks");
+  }
+  const int          blockid        = static_cast<int>(srcblk.id);
+  const unsigned int nsymbs         = block_K(static_cast<unsigned int>(blockid));
+  const unsigned long byte_off      = block_byte_offset(static_cast<unsigned int>(blockid));
+  unsigned long      blocksize      = static_cast<unsigned long>(nsymbs) * T;
   if (byte_off + blocksize > F) {
     blocksize = F - byte_off;
   }
-  // RFC 5053 §5.4 source-block layout: bitstem-r10 wants exactly
-  // nsymbs × T bytes of source. For every block except possibly the
-  // last the file buffer is already a multiple of T, so we just
-  // memcpy the source slice into the block scratch. For the trailing
-  // block when F % T ≠ 0, the scratch is zero-initialised (resize)
-  // so the trailing partial source symbol gets zero-padding for free.
   const unsigned int symbols_to_emit = target_K(blockid);
   const unsigned int padded_size     = nsymbs * T;
-  // One allocation per block instead of `symbols_to_emit` separate
-  // `new char[T]` calls. The scratch's first nsymbs*T bytes hold the
-  // source symbols (slot i at offset i*T); the trailing
-  // (symbols_to_emit - nsymbs)*T bytes are written in-place by R10's
-  // EncodeSymbol() for the repair ESIs. Source ESIs (i < nsymbs) are
-  // already correct from the FileFiller copy below — Raptor's LT for
-  // ESI<K reproduces the source symbol byte-for-byte, so there's no
-  // reason to round-trip those bytes through Encoder::EncodeSymbol.
-  if (_enc_scratch.size() <= static_cast<std::size_t>(blockid)) {
-    _enc_scratch.resize(static_cast<std::size_t>(blockid) + 1);
+  // One scratch buffer reused across blocks. Sized to max K_target ×
+  // T (which is just K_target × T for KL block since KL ≥ KS). Resize
+  // upward only — std::vector::resize doesn't shrink-fit, so on
+  // subsequent blocks the allocation is already in place and the
+  // source memcpy below overwrites the old contents.
+  const std::size_t scratch_bytes =
+      static_cast<std::size_t>(symbols_to_emit) * T;
+  if (_enc_scratch.size() < scratch_bytes) {
+    _enc_scratch.resize(scratch_bytes);
   }
-  auto& scratch = _enc_scratch[blockid];
-  scratch.assign(static_cast<std::size_t>(symbols_to_emit) * T, '\0');
-  std::memcpy(scratch.data(), buffer, blocksize);
+  // Source bytes go straight into slots [0, nsymbs). For the
+  // trailing block when F % T ≠ 0, the partial last symbol's tail is
+  // zero-padded — the only zero-fill we still need (≤ T bytes per
+  // file, on the very last block). Repair slots [nsymbs, target_K)
+  // are written in-place by EncodeSymbol below; that function does
+  // its own std::fill at entry, so no zero-init needed here.
+  std::memcpy(_enc_scratch.data(), _enc_src_buffer + byte_off, blocksize);
+  if (blocksize < padded_size) {
+    std::memset(_enc_scratch.data() + blocksize, 0, padded_size - blocksize);
+  }
 
-  spdlog::debug("Constructing r10 encoder for SBN {}: K={} blocksize={} (padded={}) target_K={}",
+  spdlog::debug("Filling r10 scratch for SBN {}: K={} blocksize={} (padded={}) target_K={}",
                 blockid, nsymbs, blocksize, padded_size, symbols_to_emit);
 
   auto enc = bitstem::r10::fast::Encoder::Create(
       static_cast<std::uint16_t>(nsymbs),
       std::span<const std::byte>(
-          reinterpret_cast<const std::byte*>(scratch.data()),
+          reinterpret_cast<const std::byte*>(_enc_scratch.data()),
           padded_size),
       T);
   if (!enc.has_value()) {
@@ -322,30 +333,34 @@ LibFlute::SourceBlock LibFlute::RaptorFEC::create_block(char *buffer,
     throw std::runtime_error("Error creating r10 encoder");
   }
 
-  source_block.symbols.resize(symbols_to_emit);
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
-    char* slot = scratch.data() + esi * T;
+    char* slot = _enc_scratch.data() + esi * T;
     if (esi >= nsymbs) {
-      // Repair symbol: r10 writes directly into the slot. No
-      // intermediate buffer + copy.
       enc->EncodeSymbol(esi,
                         std::span<std::byte>(
                             reinterpret_cast<std::byte*>(slot), T));
     }
-    // For source ESIs (esi < nsymbs) the slot already holds the
-    // correct bytes from the FileFiller memcpy above; r10's LT for
-    // those ESIs would reproduce the same bytes — skip the work.
-    source_block.symbols[esi] = LibFlute::Symbol{
-        .data     = slot,
-        .length   = T,
-        .complete = false,
-        .queued   = false,
-    };
+    // Source ESIs (esi < nsymbs) reuse the bytes already memcpy'd in
+    // — r10's LT for esi<K reproduces the source symbol verbatim.
+    srcblk.symbols[esi].data     = slot;
+    srcblk.symbols[esi].length   = T;
+    srcblk.symbols[esi].complete = false;
+    srcblk.symbols[esi].queued   = false;
   }
-  if (bytes_read != nullptr) {
-    *bytes_read += blocksize;
+  _enc_scratch_sbn = blockid;
+}
+
+void LibFlute::RaptorFEC::prepare_for_emit(LibFlute::SourceBlock& srcblk) {
+  if (!is_encoder) return;
+  // Idempotent: same block already in scratch with valid Symbol
+  // pointers means we're being re-entered (shouldn't happen on the
+  // forward-only emit path, but cheap to guard).
+  if (_enc_scratch_sbn == static_cast<int>(srcblk.id) &&
+      !srcblk.symbols.empty() &&
+      srcblk.symbols[0].data != nullptr) {
+    return;
   }
-  return source_block;
+  fill_block_into_scratch(srcblk);
 }
 
 std::vector<LibFlute::SourceBlock>
@@ -361,32 +376,37 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
   std::vector<LibFlute::SourceBlock> block_vec(Z);
   *bytes_read = 0;
 
-  // Single-threaded block emission. Per-block work used to be
-  // dominated by bitstem::r10::Encoder::Create's schedule
-  // construction (~5–70 ms at K=8000), but as of bitstem-r10 commit
-  // 281aeea that schedule is process-cached by K, so the second-and-
-  // later same-K block in a file pays only the data-dependent
-  // ApplyDecodingSchedule + EncodeSymbol cost. For HLS/DASH-style
-  // sessions where every segment shares the same K, the cache also
-  // eats the cost across files. Parallelism across SBN gives marginal
-  // additional speedup once the cache is in place; revisit if a
-  // workload shows up where it actually moves the needle.
+  if (is_encoder) {
+    // Encoder side: build placeholders only. The actual scratch fill
+    // + repair-symbol generation is deferred to prepare_for_emit(),
+    // invoked by File::get_next_symbols when the cursor first hits
+    // each block. Peak memory is one block's worth (max K × T) of
+    // scratch, not Z × that, and the per-block work happens
+    // interleaved with packet dispatch — useful when the consumer
+    // applies back-pressure (rate limiting, syscall blocking).
+    _enc_src_buffer     = buffer;
+    _enc_src_buffer_len = F;
+    _enc_scratch_sbn    = -1;
+    *bytes_read         = static_cast<int>(F);
+    for (unsigned int sbn = 0; sbn < Z; ++sbn) {
+      block_vec[sbn] = create_block_placeholder(static_cast<int>(sbn));
+    }
+    return block_vec;
+  }
+
+  // Decoder side: Symbol::data points directly into the receiver's
+  // file buffer (one slot per ESI).
   for (unsigned int sbn = 0; sbn < Z; ++sbn) {
-    if (!is_encoder) {
-      auto& block = block_vec[sbn];
-      block.id = sbn;
-      const unsigned long blk_off        = block_byte_offset(sbn);
-      const unsigned int  symbols_to_read = target_K(sbn);
-      block.symbols.reserve(symbols_to_read);
-      for (unsigned int i = 0; i < symbols_to_read; ++i) {
-        LibFlute::Symbol sym{};
-        sym.data     = buffer + blk_off + static_cast<unsigned long>(i) * T;
-        sym.length   = T;
-        block.symbols.push_back(sym);
-      }
-    } else {
-      block_vec[sbn] = create_block(buffer + block_byte_offset(sbn),
-                                     bytes_read, sbn);
+    auto& block = block_vec[sbn];
+    block.id = sbn;
+    const unsigned long blk_off        = block_byte_offset(sbn);
+    const unsigned int  symbols_to_read = target_K(sbn);
+    block.symbols.reserve(symbols_to_read);
+    for (unsigned int i = 0; i < symbols_to_read; ++i) {
+      LibFlute::Symbol sym{};
+      sym.data     = buffer + blk_off + static_cast<unsigned long>(i) * T;
+      sym.length   = T;
+      block.symbols.push_back(sym);
     }
   }
   return block_vec;
