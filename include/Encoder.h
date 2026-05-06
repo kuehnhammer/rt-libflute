@@ -162,6 +162,63 @@ class Encoder {
   /// FDT/Cache-Control Expires fields.
   static std::uint64_t seconds_since_epoch();
 
+  /// Inputs for EstimateOverhead.
+  ///
+  /// `payload_bps`: target user-data rate (the application's
+  ///                "useful" bytes per second, before FEC and wire
+  ///                headers).
+  /// `mtu`:         L2 MTU in bytes (typical 1500 for Ethernet,
+  ///                lower for tunnelled paths). Setting this to the
+  ///                value passed to the Encoder ctor matches what
+  ///                send_next_packet() will actually emit.
+  /// `ipv6`:        true ⇒ 40-byte IP header instead of 20.
+  /// `fec_scheme`:  Raptor (= R10) or CompactNoCode. Only the
+  ///                Raptor variant draws a `fec_redundancy`
+  ///                contribution; CompactNoCode forces 0.
+  /// `fec_redundancy`: target repair overhead expressed as a
+  ///                fraction of the source symbol count
+  ///                (0.40 = 40 % repair, i.e. encoder broadcasts
+  ///                1.4×K symbols for every K source symbols).
+  ///                Ignored for CompactNoCode.
+  /// `fdt_period_seconds` / `fdt_size_bytes`: cadence and average
+  ///                serialised size of the FDT broadcast. The
+  ///                planner amortises the FDT cost across that
+  ///                period.
+  struct OverheadParameters {
+    std::uint64_t payload_bps          = 0;
+    unsigned int  mtu                  = 1500;
+    bool          ipv6                 = false;
+    FecScheme     fec_scheme           = FecScheme::CompactNoCode;
+    double        fec_redundancy       = 0.0;
+    unsigned int  fdt_period_seconds   = 5;
+    unsigned int  fdt_size_bytes       = 2000;
+  };
+
+  /// Output of EstimateOverhead. All fields are wire bps; total_bps
+  /// is the sum of the four contributions and is what an operator
+  /// would need to budget on the broadcast bearer to deliver
+  /// payload_bps of user data with the requested FEC redundancy.
+  struct OverheadEstimate {
+    std::uint64_t payload_bps        = 0;  // input
+    std::uint64_t fec_repair_bps     = 0;  // FEC repair-symbol stream
+    std::uint64_t packet_header_bps  = 0;  // IP+UDP+LCT+SBN/ESI
+                                           //   per file packet
+    std::uint64_t fdt_bps            = 0;  // FDT instances incl. own
+                                           //   per-packet headers
+    std::uint64_t total_bps          = 0;  // = sum of the four above
+  };
+
+  /// Plan-side helper: estimate the wire byte rate the broadcast
+  /// bearer must carry to deliver `payload_bps` of user data with
+  /// the requested FEC scheme + redundancy. Composes the FLUTE per-
+  /// packet header overhead, the FEC repair-symbol overhead, and
+  /// the amortised FDT broadcast cost.
+  ///
+  /// Pure / stateless. Use at planner time to size a bearer; not
+  /// part of the runtime encode path.
+  static OverheadEstimate
+  EstimateOverhead(const OverheadParameters& p);
+
  private:
   void queue_fdt_locked();
   void file_transmitted_locked(std::uint32_t toi);

@@ -62,6 +62,82 @@ std::uint64_t Encoder::seconds_since_epoch() {
          2'208'988'800ULL;
 }
 
+Encoder::OverheadEstimate
+Encoder::EstimateOverhead(const Encoder::OverheadParameters& p) {
+  // Header sizes for the per-packet overhead. The FLUTE encoder in
+  // this build emits a 12-byte LCT header on file packets (LCT base
+  // 4 + CCI 4 + half-word TSI 2 + half-word TOI 2; toi_flag=0,
+  // half_word_flag=1) and a 32-byte LCT header on FDT packets
+  // (TOI=0 ⇒ EXT_FDT 4 + EXT_FTI 16 added). For both Raptor and
+  // CompactNoCode the FEC payload ID is 4 bytes (SBN+ESI). UDP and
+  // IPv4/IPv6 are RFC standard.
+  constexpr unsigned int kUdpHdr        = 8;
+  constexpr unsigned int kIpv4Hdr       = 20;
+  constexpr unsigned int kIpv6Hdr       = 40;
+  constexpr unsigned int kLctHdrFile    = 12;
+  constexpr unsigned int kLctHdrFdt     = 32;
+  constexpr unsigned int kFecPayloadId  = 4;
+
+  const unsigned int ip_hdr =
+      p.ipv6 ? kIpv6Hdr : kIpv4Hdr;
+  const unsigned int file_packet_overhead =
+      ip_hdr + kUdpHdr + kLctHdrFile + kFecPayloadId;
+  const unsigned int fdt_packet_overhead =
+      ip_hdr + kUdpHdr + kLctHdrFdt  + kFecPayloadId;
+
+  OverheadEstimate r{};
+  r.payload_bps = p.payload_bps;
+  if (p.mtu <= file_packet_overhead) {
+    // MTU too small to carry any payload; can only return the input.
+    r.total_bps = p.payload_bps;
+    return r;
+  }
+
+  const unsigned int file_payload_per_packet = p.mtu - file_packet_overhead;
+
+  // FEC repair-symbol contribution. CompactNoCode has no repair
+  // path; Raptor scales source bps by `fec_redundancy` to get the
+  // per-second repair byte rate.
+  double redundancy = p.fec_redundancy;
+  if (p.fec_scheme == FecScheme::CompactNoCode || redundancy < 0.0) {
+    redundancy = 0.0;
+  }
+  r.fec_repair_bps =
+      static_cast<std::uint64_t>(static_cast<double>(p.payload_bps) * redundancy);
+
+  // Per-packet header overhead amortised across the packet rate
+  // implied by (payload + repair) / file_payload_per_packet.
+  // Algebraically equivalent to:
+  //   header_bps = (payload_bps + fec_repair_bps)
+  //              * (file_packet_overhead / file_payload_per_packet)
+  // expressed via the packet-rate intermediate so the rounding
+  // matches the formula the application has been computing.
+  const double effective_payload_bps =
+      static_cast<double>(p.payload_bps + r.fec_repair_bps);
+  const double pkt_rate =
+      effective_payload_bps / (8.0 * static_cast<double>(file_payload_per_packet));
+  r.packet_header_bps = static_cast<std::uint64_t>(
+      pkt_rate * 8.0 * static_cast<double>(file_packet_overhead));
+
+  // FDT broadcast amortised over `fdt_period_seconds`. The FDT body
+  // is `fdt_size_bytes` of XML, fragmented into ⌈body / payload⌉
+  // packets each carrying its own header overhead.
+  if (p.fdt_period_seconds > 0 && p.mtu > fdt_packet_overhead) {
+    const unsigned int fdt_payload_per_packet = p.mtu - fdt_packet_overhead;
+    const std::uint64_t fdt_packets_per_period =
+        (static_cast<std::uint64_t>(p.fdt_size_bytes) + fdt_payload_per_packet - 1)
+            / fdt_payload_per_packet;
+    const std::uint64_t fdt_bytes_per_period =
+        fdt_packets_per_period
+        * static_cast<std::uint64_t>(fdt_packet_overhead + fdt_payload_per_packet);
+    r.fdt_bps = (fdt_bytes_per_period * 8ULL) / p.fdt_period_seconds;
+  }
+
+  r.total_bps = r.payload_bps + r.fec_repair_bps
+              + r.packet_header_bps + r.fdt_bps;
+  return r;
+}
+
 void Encoder::register_completion_callback(CompletionCallback cb) {
   const std::lock_guard<std::mutex> lock(_mutex);
   _completion_cb = std::move(cb);
