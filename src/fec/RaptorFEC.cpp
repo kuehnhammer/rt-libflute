@@ -123,7 +123,7 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
   spdlog::debug("Constructing r10 decoder for SBN {}: K={} blocksize={}",
                 sbn, nsymbs, blocksize);
 
-  auto dec = bitstem::r10::fast::Decoder::Create(
+  auto dec = bitstem::fec::fast::Decoder::Create(
       static_cast<std::uint16_t>(nsymbs), T);
   if (!dec.has_value()) {
     spdlog::error("r10::fast::Decoder::Create failed for SBN {} K={}",
@@ -148,10 +148,8 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
     // Block already decoded (almost always via the K+1 opportunistic
     // path in check_source_block_completion). Subsequent symbols are
     // expected redundancy from the encoder's repair overhead — drop
-    // them silently. Used to be spdlog::warn here, which was free
-    // pre-R10 (block decoded only at FDT end-of-transmission, never
-    // mid-stream) but is hot now: ~0.15·K symbols per block fire it
-    // after early decode lands.
+    // them silently. spdlog level kept at trace because ~0.15·K
+    // symbols per block hit this branch after early decode lands.
     spdlog::trace("Skipped symbol after early decode: SBN {}, ESI {}",
                   srcblk.id, id);
     return true;
@@ -385,7 +383,7 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
   if (slot_ptr == nullptr) {
     for (auto& slot : _enc_slots) {
       if (!slot.enc.has_value()) {
-        auto enc = bitstem::r10::fast::Encoder::Create(
+        auto enc = bitstem::fec::fast::Encoder::Create(
             static_cast<std::uint16_t>(nsymbs), T);
         if (!enc.has_value()) {
           spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
