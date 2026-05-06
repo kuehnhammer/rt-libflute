@@ -25,12 +25,12 @@
 #include "fec/FecTransformer.h"
 #include "flute_types.h"
 
-#include "bitstem/fec/fec.hpp"
+#include "bitstem/r10/r10.hpp"
 
 namespace tinyxml2 { class XMLElement; }
 
 namespace LibFlute {
-  // Glue between LibFlute's FEC abstraction and the bitstem::fec::fast
+  // Glue between LibFlute's FEC abstraction and the bitstem::r10::fast
   // Encoder / Decoder. One r10::fast::Decoder is constructed per source
   // block on first received symbol and reused across all subsequent
   // process_symbol() calls for that block.
@@ -48,7 +48,7 @@ namespace LibFlute {
       // on the receive side -> decoder), so they share storage as an
       // optional + a map respectively.
       struct DecoderCtx {
-        std::optional<bitstem::fec::fast::Decoder> dec;
+        std::optional<bitstem::r10::fast::Decoder> dec;
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
         bool decoded = false;           // cached IsDecoded() so we don't re-call TryDecode
@@ -100,7 +100,7 @@ namespace LibFlute {
       // 2-slot map is sufficient.
       struct EncSlot {
         std::uint16_t K = 0;
-        std::optional<bitstem::fec::fast::Encoder> enc;
+        std::optional<bitstem::r10::fast::Encoder> enc;
       };
       std::array<EncSlot, 2> _enc_slots;
       // SBN currently materialised in _enc_scratch, or -1 if scratch

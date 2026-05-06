@@ -50,15 +50,15 @@ configure_file("include/Version.h.in" "Version.h")
 set(CMAKE_CXX_CLANG_TIDY clang-tidy)
 
 if(ENABLE_RAPTOR)
-  message(STATUS "Compiling bitstem-fec (lib/raptor/) for Raptor FEC support. To disable support build with -DENABLE_RAPTOR=OFF")
-  # bitstem-fec is a CMake-aware C++ submodule with its own targets.
+  message(STATUS "Compiling bitstem-r10 (lib/raptor/) for Raptor FEC support. To disable support build with -DENABLE_RAPTOR=OFF")
+  # bitstem-r10 is a CMake-aware C++ submodule with its own targets.
   # Suppress its tests/benchmarks when embedded -- we only need the
-  # `fec` static library.
+  # `r10` static library.
   set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  set(FEC_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+  set(R10_BUILD_BENCH OFF CACHE BOOL "" FORCE)
   add_subdirectory(${PROJECT_SOURCE_DIR}/lib/raptor)
 else()
-  message(STATUS "Skipping bitstem-fec build. To enable Raptor FEC support build with -DENABLE_RAPTOR=ON")
+  message(STATUS "Skipping bitstem-r10 build. To enable Raptor FEC support build with -DENABLE_RAPTOR=ON")
 endif()
 
 # Single library target. Encoder + Decoder are the public surface; the
@@ -90,10 +90,10 @@ if(ENABLE_RAPTOR)
     PUBLIC
       include/fec/RaptorFEC.h
   )
-  # bitstem-fec's own CMakeLists exports the include path on the `fec`
-  # target (target_include_directories(fec PUBLIC include)), so linking
+  # bitstem-r10's own CMakeLists exports the include path on the `r10`
+  # target (target_include_directories(r10 PUBLIC include)), so linking
   # is enough.
-  target_link_libraries(flute LINK_PUBLIC fec)
+  target_link_libraries(flute LINK_PUBLIC r10)
 endif()
 
 target_link_libraries(flute
