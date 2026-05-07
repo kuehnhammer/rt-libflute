@@ -3,8 +3,9 @@
 A small, transport-agnostic implementation of the FLUTE/ALC file
 delivery stack (RFC 6726 over RFC 5775 over RFC 5651), with the 3GPP
 TS 26.346 MBMS extensions surfaced on the `FileEntry` structure and
-optional Raptor (RFC 5053) FEC integration via the `bitstem-r10`
-codec.
+optional Raptor (RFC 5053) / RaptorQ (RFC 6330) FEC integration via
+the `bitstem-fec` codec, shipped as a binary distribution under
+`lib/bitstem-fec/`.
 
 The library produces and consumes ALC packet *bytes*. Wire transport
 — UDP, IP multicast, broadcast-pipeline RLC SDUs, pcap replay — is
@@ -35,7 +36,7 @@ under the API.
 sudo apt install ninja-build build-essential libspdlog-dev \
     pkgconf libssl-dev libtinyxml2-dev clang-tidy
 
-git clone --recurse-submodules <repo-url>
+git clone <repo-url>
 cd libflute
 cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -45,9 +46,15 @@ Build options:
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `-DENABLE_RAPTOR=ON` | OFF | Compile in Raptor (RFC 5053) FEC support via `lib/raptor` (bitstem-r10). |
+| `-DENABLE_RAPTOR=ON` | OFF | Link in the `bitstem-fec` codec (RFC 5053 R10 + RFC 6330 RaptorQ). Requires the matching binary tarball under `lib/bitstem-fec/<platform>/` — see [bitstem-fec integration](#bitstem-fec-integration) below. |
 | `-DLIBFLUTE_BUILD_TESTING=ON` | ON | GoogleTest unit tests (fetches v1.15.2 via FetchContent). |
 | `-DLIBFLUTE_BUILD_EXAMPLES=ON` | ON | The plain POSIX-socket demo apps in `examples/`. |
+| `-DBSF_DISTRO=<codename>` | auto | Override the Linux distro codename used to select the bitstem-fec tarball (default: read from `/etc/os-release VERSION_CODENAME`). |
+| `-DBSF_MICROARCH=v3` | `v3` | x86-64 microarchitecture level the bitstem-fec tarball is built for (`v1`/`v2`/`v3`/`v4`). |
+
+`-DENABLE_RAPTOR=OFF` (the default) gives a CompactNoCode-only build
+with no dependency on `bitstem-fec` — the library is fully usable
+without the binary lib being present at all.
 
 Run the test suite:
 
@@ -85,6 +92,61 @@ Quick loopback demo:
 `-r` is the rate cap in kbit/s; pass `-r 0` for unlimited. `-f 1`
 enables Raptor on the TX side (only meaningful when the library was
 built with `ENABLE_RAPTOR=ON`).
+
+## bitstem-fec integration
+
+`bitstem-fec` (RFC 5053 R10 + RFC 6330 RaptorQ codec) is shipped as
+platform-specific binary tarballs vendored in-tree under
+`lib/bitstem-fec/`. The exact version is pinned by a one-line
+`lib/bitstem-fec/VERSION` file; `cmake/BitstemFEC.cmake` reads that
+pin, builds the expected tarball name from the host triple
+(`<distro>-<arch>-<microarch>`), and extracts the matching archive
+into the build tree on the first configure pass. Subsequent runs
+hit a stamp file and skip.
+
+The integration declares an imported target `bitstem::fec` against
+the extracted shared library, so `libflute` dynamically links
+`libfec.so.0`. CMake-managed rpath wires development builds to the
+in-tree extraction directory; install rules are the consumer's
+responsibility (typical 5gbc-rx pattern: ship `libfec.so.*` next to
+the binary, use `INSTALL_RPATH=$ORIGIN`).
+
+If the expected tarball is missing for the host triple, configure
+hard-fails with a pointer to drop one in or override `BSF_DISTRO` /
+`BSF_MICROARCH`. Stale checkouts (binaries that don't match
+`VERSION`) fail fast at configure time rather than at runtime.
+
+### Layout
+
+```
+lib/bitstem-fec/
+├── VERSION                              # one-line pin (e.g. "0.9.0+main.99a6ce0")
+├── README.md                            # detailed update notes
+├── linux/
+│   ├── bitstem-fec-shared-<VERSION>-noble-x86_64-v3.tar.gz
+│   └── bitstem-fec-shared-<VERSION>-jammy-x86_64-v3.tar.gz
+├── windows/                             # when ready
+└── macos/                               # when ready
+```
+
+Each tarball expands to `include/bitstem/fec/fec.hpp`,
+`lib/libfec.so` (+ soname symlinks), and `share/bitstem/fec/LICENSE`.
+
+### Updating to a new bitstem-fec version
+
+The update workflow is a single atomic commit:
+
+1. Drop the new tarballs into `lib/bitstem-fec/<platform>/`. Keep
+   the names exactly as produced by the bitstem-fec release
+   pipeline:
+   `bitstem-fec-shared-<version>-<distro>-<arch>-<microarch>.tar.gz`.
+2. Bump the string in `lib/bitstem-fec/VERSION` to match.
+3. Optionally remove the prior version's tarballs (kept around for
+   bisection / rollback if disk-space and git-history budget allow).
+4. Reconfigure (`cmake -S . -B build ...`) and rebuild.
+
+Reviewers see the binaries plus the pin in the same diff; rolling
+back is a `git revert` of that one commit.
 
 ## Wire-format conformance
 
