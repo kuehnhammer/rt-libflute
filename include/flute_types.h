@@ -167,6 +167,13 @@ namespace LibFlute {
     // the integrator picks this per their build/deployment config.
     std::uint64_t sub_block_size_target = 0;
 
+    // RFC 6330 §4.3 SS — desired lower bound on sub-symbol size,
+    // expressed as a multiplier on Al. The §4.3 algorithm picks
+    // N ≤ T/(SS·Al), so SS=1 (default) leaves the algorithm free to
+    // pick the largest N the partition allows; SS>1 forces fewer,
+    // larger sub-symbols. RaptorQ-only knob; ignored for R10.
+    std::uint8_t sub_symbol_size_min_multiplier = 1;
+
     FileTransmissionConfig() = default;
 
     // NOLINTNEXTLINE(google-explicit-constructor) — implicit conversion

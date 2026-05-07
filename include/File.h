@@ -59,7 +59,8 @@ namespace LibFlute {
           bool copy_data = false,
           std::optional<unsigned> fec_redundancy_level = std::nullopt,
           unsigned fec_worker_threads = 0,
-          uint64_t sub_block_size_target = 0);
+          uint64_t sub_block_size_target = 0,
+          uint8_t sub_symbol_size_min_multiplier = 1);
 
      /**
       *  Default destructor.

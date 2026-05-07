@@ -70,7 +70,8 @@ LibFlute::File::File(uint32_t toi,
     bool copy_data,
     [[maybe_unused]] std::optional<unsigned> fec_redundancy_level,
     [[maybe_unused]] unsigned fec_worker_threads,
-    [[maybe_unused]] uint64_t sub_block_size_target)
+    [[maybe_unused]] uint64_t sub_block_size_target,
+    [[maybe_unused]] uint8_t sub_symbol_size_min_multiplier)
 {
   if (data == nullptr) {
     spdlog::error("File pointer is null");
@@ -122,7 +123,8 @@ LibFlute::File::File(uint32_t toi,
       auto raptor = std::make_shared<RaptorFEC>(raptor_oti,
                                                   fec_redundancy_level,
                                                   fec_worker_threads,
-                                                  sub_block_size_target);
+                                                  sub_block_size_target,
+                                                  sub_symbol_size_min_multiplier);
       _meta.fec_transformer = raptor;
       _meta.fec_oti.transfer_length        = length;
       _meta.fec_oti.encoding_symbol_length = raptor->T;

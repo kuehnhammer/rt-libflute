@@ -32,6 +32,7 @@
 
 #include "spdlog/spdlog.h"
 #include "base64.h"
+#include "fec/rfc6330_kprime_table.h"
 
 namespace {
 // Map libflute's wire-level FecScheme to the bitstem-fec codec
@@ -51,7 +52,8 @@ bitstem::fec::Scheme to_bitstem_scheme(LibFlute::FecScheme s) {
 LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
                                 std::optional<unsigned> fec_redundancy_level,
                                 unsigned fec_worker_threads,
-                                std::uint64_t sub_block_size_target)
+                                std::uint64_t sub_block_size_target,
+                                std::uint8_t sub_symbol_size_min_multiplier)
     // Init order matches member declaration order in RaptorFEC.h
     // (Wreorder-ctor under -Werror).
     : _fec_worker_threads(fec_worker_threads)
@@ -65,6 +67,9 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
   }
   if (sub_block_size_target != 0) {
     W = static_cast<unsigned long>(sub_block_size_target);
+  }
+  if (sub_symbol_size_min_multiplier > 0) {
+    SS = sub_symbol_size_min_multiplier;
   }
 
   // Caller-supplied scheme-specific info path (xMB → SDP → libflute).
@@ -122,29 +127,60 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
     throw std::runtime_error("Input is less than 4 symbols");
   }
 
-  // Z: caller-supplied wins; otherwise dispatch on scheme.
+  // RFC 6330 §4.3 KL(n): the maximum K' value in §5.6 Table 2 such
+  // that K' <= WS / (Al · ceil(T/(Al·n))). Returns 0 if no K' fits
+  // (WS too small for the codec's smallest table entry).
+  auto kl_for_n = [&](unsigned n) -> std::uint32_t {
+    if (n == 0) return 0;
+    const auto t1n  = (T + (Al * n) - 1u) / (Al * n);  // ceil(T/(Al·n))
+    if (t1n == 0) return 0;
+    const auto bound = static_cast<std::uint64_t>(W) /
+                       (static_cast<std::uint64_t>(Al) * t1n);
+    auto it = std::upper_bound(rfc6330::kKPrimeTable.begin(),
+                                rfc6330::kKPrimeTable.end(),
+                                static_cast<std::uint32_t>(
+                                    std::min<std::uint64_t>(
+                                        bound,
+                                        std::numeric_limits<std::uint32_t>::max())));
+    if (it == rfc6330::kKPrimeTable.begin()) return 0;
+    return *(it - 1);
+  };
+
+  // Z + N derivation: caller-supplied SSI wins; otherwise dispatch
+  // on scheme.
   //
-  // RFC 5053 §4.2 (R10): only K_max bounds Z; W shapes N below.
-  // RFC 6330 §4.3 (RaptorQ): WS additionally bounds K_per_block * T
-  //   so the codec's working memory per source block fits in WS.
-  //   K_max provides a hard ceiling on Z.
+  // RFC 5053 §4.2 (R10): K_max=8192 bounds Z; W shapes N below.
+  // RFC 6330 §4.3 (RaptorQ): the example parameter derivation
+  //   algorithm is computed verbatim here. Z = ceil(Kt/KL(N_max)),
+  //   N = min n in [1, N_max] s.t. ceil(Kt/Z) <= KL(n). Both Z and
+  //   N are determined by the algorithm; they are NOT independent
+  //   knobs.
   if (!_ssi_caller_supplied) {
-    const std::uint64_t z_by_kmax =
-        (static_cast<std::uint64_t>(Kt) + K_max - 1ULL) / K_max;
     if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
-      const std::uint64_t z_by_ws = (W > 0)
-          ? (static_cast<std::uint64_t>(Kt) * T + W - 1ULL) / W
-          : 1ULL;
-      Z = static_cast<unsigned int>(std::max(z_by_kmax, z_by_ws));
-      spdlog::debug("Z = {} = max(ceil(Kt/K'_max)={}, ceil(Kt*T/WS)={}) "
-                    "(RFC 6330 §4.3, K'_max={}, WS={})",
-                    Z, z_by_kmax, z_by_ws, K_max, W);
+      const unsigned n_max = T / (static_cast<unsigned>(SS) * Al);
+      if (n_max < 1u) {
+        throw std::runtime_error(
+            "RaptorFEC §4.3: N_max < 1, T must be at least SS·Al octets");
+      }
+      const std::uint32_t kl_max = kl_for_n(n_max);
+      if (kl_max == 0u) {
+        throw std::runtime_error(
+            "RaptorFEC §4.3: WS is too small for any K' in Table 2 "
+            "at this T / Al / N_max combination — increase WS");
+      }
+      Z = static_cast<unsigned>(
+          (static_cast<std::uint64_t>(Kt) + kl_max - 1ULL) / kl_max);
+      if (Z < 1u) Z = 1u;
+      spdlog::debug("Z = {} = ceil(Kt={}/KL(N_max={})={}) (RFC 6330 §4.3)",
+                    Z, Kt, n_max, kl_max);
     } else {
-      Z = static_cast<unsigned int>(z_by_kmax);
+      // RFC 5053 §4.2: K_max-bounded only. N is derived later.
+      Z = static_cast<unsigned int>(
+          (static_cast<std::uint64_t>(Kt) + K_max - 1ULL) / K_max);
+      if (Z < 1u) Z = 1u;
       spdlog::debug("Z = {} = ceil(Kt/K_max) (RFC 5053 §4.2, K_max={})",
                     Z, K_max);
     }
-    if (Z < 1u) Z = 1u;
   } else {
     spdlog::debug("Z = {} (caller-supplied via SSI)", Z);
   }
@@ -179,22 +215,36 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
   spdlog::debug("§4.4.1.2 partitioning: Z={} ZL={} ZS={} KL={} KS={}",
                 Z, ZL, ZS, KL, KS);
 
-  // N: caller-supplied wins; otherwise dispatch on scheme.
+  // N derivation: caller-supplied SSI wins; otherwise dispatch.
   //
-  // RFC 5053 §4.2 (R10): N is the codec's cache-friendliness knob —
-  //   small W spawns more sub-blocks per source block. The formula
-  //   N = min(ceil(ceil(Kt/Z)·T/W), T/Al) caps N at the per-Al
-  //   ceiling. TS 26.346-conformant R10 file delivery uses W=256 KB
-  //   which intentionally produces N>1 for multi-MiB blocks.
+  // RFC 5053 §4.2 (R10): N is the codec's cache-friendliness knob.
+  //   N = min(ceil(ceil(Kt/Z)·T/W), T/Al). Small W spawns more
+  //   sub-blocks per source block.
   //
-  // RFC 6330 §4.3 (RaptorQ): WS is consumed in the Z computation
-  //   above (so K_per_block · T ≤ WS by construction). Sub-block
-  //   partitioning isn't needed for working-memory reasons and the
-  //   spec leaves N=1 in the standard derivation. We follow.
+  // RFC 6330 §4.3 (RaptorQ): N is the SMALLEST n in [1, N_max] such
+  //   that ceil(Kt/Z) ≤ KL(n). This minimises sub-block count
+  //   subject to the working-memory bound — the spec doesn't permit
+  //   the encoder to pick a different value.
   if (!_ssi_caller_supplied) {
     if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
-      N = 1u;
-      spdlog::debug("N = 1 (RFC 6330 §4.3; WS already absorbed in Z)");
+      const unsigned int k_per_block = (Kt + Z - 1u) / Z;
+      const unsigned int n_max = T / (static_cast<unsigned>(SS) * Al);
+      unsigned int n_pick = 0;
+      for (unsigned n = 1; n <= n_max; ++n) {
+        if (kl_for_n(n) >= k_per_block) {
+          n_pick = n;
+          break;
+        }
+      }
+      if (n_pick == 0) {
+        throw std::runtime_error(
+            "RaptorFEC §4.3: no n in [1, N_max] satisfies KL(n) ≥ "
+            "ceil(Kt/Z); WS is too tight for the chosen Z");
+      }
+      N = n_pick;
+      spdlog::debug("N = {} (RFC 6330 §4.3; smallest n with KL(n) ≥ "
+                    "ceil(Kt/Z)={} given WS={})",
+                    N, k_per_block, W);
     } else {
       N = fmin( ceil( ceil((double)Kt / (double)Z) * (double)T / (double)W ),
                 (double)T / (double)Al );

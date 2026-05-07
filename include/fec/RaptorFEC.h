@@ -225,7 +225,8 @@ namespace LibFlute {
       RaptorFEC(const FecOti& fec_oti,
                 std::optional<unsigned> fec_redundancy_level = std::nullopt,
                 unsigned fec_worker_threads = 0,
-                std::uint64_t sub_block_size_target = 0);
+                std::uint64_t sub_block_size_target = 0,
+                std::uint8_t sub_symbol_size_min_multiplier = 1);
 
       // Decoder-side empty ctor. The scheme is supplied so AlcPacket /
       // EncodingSymbol can dispatch on the correct FEC-Payload-ID width
@@ -264,13 +265,17 @@ namespace LibFlute {
       unsigned int F;          // object size in bytes
       unsigned int Al = 4;     // symbol alignment
       unsigned int T;          // symbol size in bytes
-      // Sub-block size target (RFC 5053 §4.2 / RFC 6330 §4.3 input).
-      // Default 16 MB biases the autodetect toward N=1, which is what
-      // the codec accepts today. Caller can override per-file via
-      // FileTransmissionConfig::sub_block_size_target — once
-      // bitstem-fec ships sub-block interleaving, the natural default
-      // for R10 flips to TS 26.346 §B.3.4.1's 256 KB.
+      // Sub-block size target (RFC 5053 §4.2 W / RFC 6330 §4.3 WS).
+      // Default 16 MB. Caller can override per-file via
+      // FileTransmissionConfig::sub_block_size_target. TS 26.346
+      // §B.3.4.1 mandates 256 KB for R10 file delivery; RaptorQ
+      // leaves WS as a deployment knob.
       unsigned long W = 16UL * 1024UL * 1024UL;
+      // RFC 6330 §4.3 SS — desired lower bound on sub-symbol size,
+      // expressed as a multiplier on Al (so the actual lower bound
+      // is SS·Al octets). Used in the §4.3 N derivation to cap N at
+      // floor(T/(SS·Al)). RaptorQ-only.
+      std::uint8_t SS = 1;
       unsigned int G;          // symbols per packet
       unsigned int Z;          // number of source blocks
       unsigned int N;          // sub-blocks per source block
