@@ -33,10 +33,16 @@
 #include "spdlog/spdlog.h"
 #include "base64.h"
 
-LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_payload)
+LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_payload,
+                                std::optional<unsigned> fec_redundancy_level,
+                                unsigned fec_worker_threads)
     : F(transfer_length)
     , P(max_payload)
+    , _fec_worker_threads(fec_worker_threads)
 {
+  if (fec_redundancy_level.has_value()) {
+    surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
+  }
   double g = fmin( fmin(ceil((double)P*1024/(double)F), (double)P/(double)Al), 10.0f);
   spdlog::debug("double g = fmin( fmin(ceil((double)P*1024/F), (double)P/(double)Al), 10.0f");
   spdlog::debug("G = {} = min( ceil({}*1024/{}), {}/{}, 10.0f)", g, P, F, P, Al);
@@ -90,7 +96,12 @@ LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_pa
   nof_large_source_blocks   = ZL;
 }
 
-LibFlute::RaptorFEC::~RaptorFEC() = default;
+LibFlute::RaptorFEC::~RaptorFEC() {
+  // Tear down the parallel-encode worker pool, if active. Idempotent
+  // when the pool was never spun up (default-constructed instances on
+  // the receive side, or sequential transmit instances).
+  stop_pool();
+}
 
 bool LibFlute::RaptorFEC::calculate_partitioning() {
   return true;
@@ -189,6 +200,18 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
       }
       for (auto& s : srcblk.symbols) {
         s.data = nullptr;
+      }
+      // Parallel-encode path: signal the worker that filled this block
+      // that its scratch can now be recycled for the next claim. The
+      // worker is currently waiting on _pool->released_cv; setting the
+      // released flag before notifying establishes the happens-before
+      // edge for the worker's subsequent fill of the next SBN.
+      if (_pool && srcblk.id < _pool->released.size()) {
+        {
+          const std::lock_guard<std::mutex> lk(_pool->mtx);
+          _pool->released[srcblk.id].store(true, std::memory_order_release);
+        }
+        _pool->released_cv.notify_all();
       }
     }
     return complete;
@@ -435,7 +458,175 @@ void LibFlute::RaptorFEC::prepare_for_emit(LibFlute::SourceBlock& srcblk) {
       srcblk.symbols[0].data != nullptr) {
     return;
   }
-  fill_block_into_scratch(srcblk);
+
+  if (_fec_worker_threads == 0) {
+    // Sequential path — pump thread fills inline.
+    fill_block_into_scratch(srcblk);
+    return;
+  }
+
+  // Parallel path. The first call lazily spins the worker pool: at
+  // this point we have a stable address for the SourceBlock array
+  // (File::_source_blocks lives until the File does), so subsequent
+  // worker indexing is safe.
+  if (!_pool) {
+    _src_blocks_data = std::addressof(srcblk) - srcblk.id;
+    start_pool(Z);
+  }
+
+  std::unique_lock<std::mutex> lk(_pool->mtx);
+  _pool->ready_cv.wait(lk, [&]() {
+    return _pool->ready[srcblk.id].load(std::memory_order_acquire);
+  });
+}
+
+void LibFlute::RaptorFEC::start_pool(std::size_t z) {
+  _pool = std::make_unique<PoolState>();
+  _pool->ready    = std::vector<std::atomic<bool>>(z);
+  _pool->released = std::vector<std::atomic<bool>>(z);
+  // std::atomic<bool> default-inits to false but only since C++20 — be
+  // explicit for clarity.
+  for (auto& a : _pool->ready)    { a.store(false, std::memory_order_relaxed); }
+  for (auto& a : _pool->released) { a.store(false, std::memory_order_relaxed); }
+
+  // Cap workers at Z — extra workers buy nothing and just waste
+  // threads sitting idle on the released_cv.
+  const unsigned int n = std::min<unsigned int>(_fec_worker_threads,
+                                                  static_cast<unsigned int>(z));
+  _pool->workers.resize(n);
+  for (unsigned int i = 0; i < n; ++i) {
+    _pool->workers[i].thread = std::thread(&RaptorFEC::worker_loop, this, i);
+  }
+}
+
+void LibFlute::RaptorFEC::stop_pool() {
+  if (!_pool) return;
+  {
+    const std::lock_guard<std::mutex> lk(_pool->mtx);
+    _pool->stop.store(true, std::memory_order_release);
+  }
+  _pool->released_cv.notify_all();
+  _pool->ready_cv.notify_all();
+  for (auto& w : _pool->workers) {
+    if (w.thread.joinable()) {
+      w.thread.join();
+    }
+  }
+  _pool.reset();
+}
+
+void LibFlute::RaptorFEC::worker_loop(unsigned worker_id) {
+  auto& w = _pool->workers[worker_id];
+  int my_held_sbn = -1;  // SBN whose data this worker's scratch holds
+
+  while (true) {
+    // If we're holding a previous block, wait for the pump to finish
+    // emitting it before recycling our scratch. The release flag is
+    // set by check_source_block_completion().
+    if (my_held_sbn >= 0) {
+      std::unique_lock<std::mutex> lk(_pool->mtx);
+      _pool->released_cv.wait(lk, [&]() {
+        return _pool->stop.load(std::memory_order_acquire) ||
+               _pool->released[my_held_sbn].load(std::memory_order_acquire);
+      });
+      if (_pool->stop.load(std::memory_order_acquire)) return;
+    }
+
+    // Claim next pending SBN. fetch_add is the load-balancing
+    // primitive — first worker to wake gets the next block.
+    const int sbn = _pool->next_sbn.fetch_add(1, std::memory_order_acq_rel);
+    if (sbn >= static_cast<int>(_pool->ready.size())) {
+      // No more blocks. Worker exits cleanly.
+      return;
+    }
+
+    fill_block_into_worker_scratch(w, _src_blocks_data[sbn]);
+
+    {
+      const std::lock_guard<std::mutex> lk(_pool->mtx);
+      _pool->ready[sbn].store(true, std::memory_order_release);
+    }
+    _pool->ready_cv.notify_all();
+    my_held_sbn = sbn;
+  }
+}
+
+void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
+    WorkerSlot& w, LibFlute::SourceBlock& srcblk) {
+  // Mirror of fill_block_into_scratch() but operating on the worker's
+  // own scratch + EncSlot[2] instead of the RaptorFEC's shared
+  // members. Source bytes come from _enc_src_buffer (read-only,
+  // shared safely across workers) at the block's offset; repair
+  // symbols are written into the worker's scratch by the per-K
+  // bitstem-r10 Encoder.
+  const int          blockid = static_cast<int>(srcblk.id);
+  const unsigned int nsymbs  = block_K(static_cast<unsigned int>(blockid));
+  const unsigned long byte_off = block_byte_offset(static_cast<unsigned int>(blockid));
+  unsigned long      blocksize = static_cast<unsigned long>(nsymbs) * T;
+  if (byte_off + blocksize > F) {
+    blocksize = F - byte_off;
+  }
+  const unsigned int symbols_to_emit = target_K(blockid);
+  const unsigned int padded_size     = nsymbs * T;
+  const std::size_t scratch_bytes =
+      static_cast<std::size_t>(symbols_to_emit) * T;
+  if (w.scratch.size() < scratch_bytes) {
+    w.scratch.resize(scratch_bytes);
+  }
+  std::memcpy(w.scratch.data(), _enc_src_buffer + byte_off, blocksize);
+  if (blocksize < padded_size) {
+    std::memset(w.scratch.data() + blocksize, 0, padded_size - blocksize);
+  }
+
+  // Per-worker per-K Encoder cache. The bitstem-fec lib's per-K
+  // schedule cache amortises Creates across workers — first worker
+  // to hit a given K pays the cold price, subsequent workers (and
+  // subsequent blocks of the same K within one worker) pay only the
+  // warm Create cost. Keeping the cache per-worker means no shared
+  // mutable state between threads on the encode hot path.
+  EncSlot* slot_ptr = nullptr;
+  for (auto& slot : w.enc_slots) {
+    if (slot.enc.has_value() && slot.K == nsymbs) {
+      slot_ptr = &slot;
+      break;
+    }
+  }
+  if (slot_ptr == nullptr) {
+    for (auto& slot : w.enc_slots) {
+      if (!slot.enc.has_value()) {
+        auto enc = bitstem::r10::fast::Encoder::Create(
+            static_cast<std::uint16_t>(nsymbs), T);
+        if (!enc.has_value()) {
+          throw std::runtime_error("Error creating r10 encoder");
+        }
+        slot.K   = static_cast<std::uint16_t>(nsymbs);
+        slot.enc = std::move(*enc);
+        slot_ptr = &slot;
+        break;
+      }
+    }
+    if (slot_ptr == nullptr) {
+      throw std::runtime_error(
+          "RaptorFEC: more than 2 distinct K values requested for one file");
+    }
+  }
+  auto& enc = *slot_ptr->enc;
+  enc.Reset(std::span<const std::byte>(
+      reinterpret_cast<const std::byte*>(w.scratch.data()),
+      padded_size));
+
+  for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
+    char* slot = w.scratch.data() + esi * T;
+    if (esi >= nsymbs) {
+      enc.EncodeSymbol(esi,
+                        std::span<std::byte>(
+                            reinterpret_cast<std::byte*>(slot), T));
+    }
+    srcblk.symbols[esi].data     = slot;
+    srcblk.symbols[esi].length   = T;
+    srcblk.symbols[esi].complete = false;
+    srcblk.symbols[esi].queued   = false;
+  }
 }
 
 std::vector<LibFlute::SourceBlock>

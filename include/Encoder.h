@@ -95,9 +95,22 @@ class Encoder {
    *                         Returns true on successful dispatch; the
    *                         encoder uses this signal to mark the
    *                         underlying symbols as transmitted.
+   * @param fec_worker_threads  Worker count for the FEC encode pool
+   *                         (Raptor / RaptorQ block fill). 0 ⇒ inline,
+   *                         single-threaded fill on the pump thread
+   *                         (today's behaviour). Non-zero ⇒ a pool of
+   *                         this many threads encodes blocks ahead of
+   *                         the pump, with per-worker per-K Encoder
+   *                         caches (the bitstem-fec schedule cache
+   *                         amortises Creates across workers). Bounded
+   *                         per-file by Z (more workers than blocks
+   *                         buys nothing); useful at K ≥ ~1000 with
+   *                         multiple blocks. Memory: each worker
+   *                         allocates its own scratch (≈ K·T) + per-K
+   *                         intermediate buffer.
    */
   Encoder(std::uint64_t tsi, unsigned mtu, std::uint32_t rate_limit_kbps,
-          PacketCallback packet_cb);
+          PacketCallback packet_cb, unsigned fec_worker_threads = 0);
   ~Encoder();
 
   Encoder(const Encoder&)            = delete;
@@ -112,11 +125,15 @@ class Encoder {
    * the completion callback fires. Pass copy_buffer=true to have the
    * encoder copy it.
    */
+  // The `fec_config` arg accepts either a bare `FecScheme` (existing
+  // call sites compile unchanged via FileTransmissionConfig's implicit
+  // ctor) or a populated `FileTransmissionConfig` for full TS 26.346
+  // §7.2.10.1 control over the per-file FEC OTI.
   std::uint16_t send(std::string content_location,
                       std::string content_type,
                       std::uint64_t expires_ntp_seconds,
                       char* data, std::size_t length,
-                      FecScheme fec_scheme = FecScheme::CompactNoCode,
+                      FileTransmissionConfig fec_config = {},
                       bool copy_buffer = false);
 
   /**
@@ -179,7 +196,15 @@ class Encoder {
   ///                fraction of the source symbol count
   ///                (0.40 = 40 % repair, i.e. encoder broadcasts
   ///                1.4×K symbols for every K source symbols).
-  ///                Ignored for CompactNoCode.
+  ///                Ignored for CompactNoCode. Cousin of (but not
+  ///                the same as) the Rel-11 FEC-Redundancy-Level
+  ///                attribute the runtime encoder consumes via
+  ///                `FileTransmissionConfig::fec_redundancy_level`
+  ///                — that one is an integer percent (40 ⇔ 0.40
+  ///                here). Plan and runtime should normally
+  ///                agree; they're decoupled so a planner can
+  ///                budget for headroom without binding the
+  ///                per-file value the encoder actually emits.
   /// `fdt_period_seconds` / `fdt_size_bytes`: cadence and average
   ///                serialised size of the FDT broadcast. The
   ///                planner amortises the FDT cost across that
@@ -230,6 +255,7 @@ class Encoder {
   std::uint64_t _tsi;
   std::uint32_t _max_payload;
   std::uint32_t _rate_limit_kbps;
+  unsigned      _fec_worker_threads;
 
   std::unique_ptr<FileDeliveryTable> _fdt;
   std::map<std::uint32_t, std::shared_ptr<File>> _files;

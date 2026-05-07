@@ -251,3 +251,84 @@ TEST(Fdt, RoundTripFromFileEntryToStringAndBack) {
     EXPECT_EQ(entries[0].fec_oti.encoding_symbol_length, 1024U);
     EXPECT_EQ(entries[0].fec_oti.max_source_block_length, 64U);
 }
+
+// TS 26.346 §7.2.10.1: the FEC-OTI-* set includes FEC-OTI-FEC-Instance-ID
+// (only meaningful for under-specified schemes), FEC-OTI-Max-Number-of-
+// Encoding-Symbols (= K + max repair), and FEC-OTI-Scheme-Specific-Info
+// (base64 wire bytes). All three round-trip through the FDT serialiser
+// when set on a FileEntry, both at FDT-Instance and per-File scope.
+TEST(Fdt, RoundTripPreservesNewFecOtiAttributes) {
+    LibFlute::FecOti global_oti{
+        LibFlute::FecScheme::Raptor,
+        /*transfer_length*/ 0,
+        /*encoding_symbol_length*/ 1024,
+        /*max_source_block_length*/ 64,
+        /*scheme_specific_info*/ "",
+        /*instance_id*/ 3,
+        /*max_number_of_encoding_symbols*/ 73,
+    };
+    LibFlute::FileDeliveryTable fdt(/*instance_id=*/11, global_oti);
+    fdt.set_expires(2208988800ULL);
+
+    LibFlute::FileDeliveryTable::FileEntry fe{};
+    fe.toi              = 12;
+    fe.content_location = "video/clip.h264";
+    fe.content_length   = 8192;
+    fe.content_md5      = "";
+    fe.content_type     = "video/h264";
+    fe.expires          = 9000;
+    fe.fec_oti = LibFlute::FecOti{
+        LibFlute::FecScheme::Raptor,
+        /*transfer_length*/ 8192,
+        /*encoding_symbol_length*/ 512,
+        /*max_source_block_length*/ 32,
+        /*scheme_specific_info*/ "AAEAAQ==",  // 4-byte base64 placeholder
+        /*instance_id*/ 5,
+        /*max_number_of_encoding_symbols*/ 37,
+    };
+    fe.fec_transformer = nullptr;
+    fdt.add(fe);
+
+    auto xml = fdt.to_string();
+    ASSERT_FALSE(xml.empty());
+
+    std::vector<char> reparse_buf(xml.begin(), xml.end());
+    LibFlute::FileDeliveryTable parsed(/*instance_id=*/11, reparse_buf.data(),
+                                        reparse_buf.size());
+    auto entries = parsed.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].fec_oti.encoding_symbol_length, 512U);
+    EXPECT_EQ(entries[0].fec_oti.max_source_block_length, 32U);
+    EXPECT_EQ(entries[0].fec_oti.instance_id, 5U);
+    EXPECT_EQ(entries[0].fec_oti.max_number_of_encoding_symbols, 37U);
+    EXPECT_EQ(entries[0].fec_oti.scheme_specific_info, "AAEAAQ==");
+}
+
+// FDT-Instance-level FEC-OTI-* defaults flow into per-File FecOti when
+// the per-File entries omit the corresponding attribute (TS 26.346
+// "absent attribute = inherit FDT-Instance default").
+TEST(Fdt, FileInheritsFdtInstanceDefaultsForNewFecOtiAttributes) {
+    // CompactNoCode encoding_id keeps the test focused on the generic
+    // FDT inheritance plumbing — under-specified-FEC transformers like
+    // RaptorFEC validate SSI shape (Z/N/Al, exactly 4 bytes) and would
+    // make this test about the transformer, not the FDT.
+    constexpr const char* kXml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<FDT-Instance Expires="2208988800"
+              FEC-OTI-FEC-Encoding-ID="0"
+              FEC-OTI-Maximum-Source-Block-Length="64"
+              FEC-OTI-Encoding-Symbol-Length="1024"
+              FEC-OTI-FEC-Instance-ID="9"
+              FEC-OTI-Max-Number-of-Encoding-Symbols="80"
+              FEC-OTI-Scheme-Specific-Info="ZGVmYXVsdA==">
+  <File TOI="1" Content-Location="x.bin" Content-Length="2048" Transfer-Length="2048"/>
+</FDT-Instance>
+)";
+    auto buf = XmlBuf(kXml);
+    LibFlute::FileDeliveryTable parsed(/*instance_id=*/1, buf.data(),
+                                        buf.size());
+    auto entries = parsed.file_entries();
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].fec_oti.instance_id, 9U);
+    EXPECT_EQ(entries[0].fec_oti.max_number_of_encoding_symbols, 80U);
+    EXPECT_EQ(entries[0].fec_oti.scheme_specific_info, "ZGVmYXVsdA==");
+}

@@ -16,10 +16,14 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 
 #include "fec/FecTransformer.h"
@@ -108,6 +112,63 @@ namespace LibFlute {
       // re-entered for the same block (shouldn't happen with the
       // forward-only emit cursor, but cheap insurance).
       int _enc_scratch_sbn = -1;
+      // Worker count for the optional parallel-encode pool. 0 ⇒ inline
+      // single-threaded fill (today's behaviour); non-zero ⇒ N workers
+      // pre-encode blocks ahead of the pump (see Encoder::Encoder doc).
+      // Plumbed in from Encoder via File ctor.
+      unsigned _fec_worker_threads = 0;
+
+      // Parallel-encode worker pool. Owned only when
+      // _fec_worker_threads > 0; nullptr otherwise. Bound to the
+      // RaptorFEC instance lifetime: spun up at the end of
+      // calculate_partitioning() / create_blocks() (once Z is known)
+      // and joined in ~RaptorFEC.
+      //
+      // Each worker holds its own scratch + EncSlot[2] cache, mirroring
+      // the per-K Encoder reuse pattern used in the sequential path.
+      // The bitstem-fec lib's per-K schedule cache transparently
+      // amortises Creates across workers — first worker per K pays the
+      // cold price, workers 2..N pay only the warm Create cost.
+      //
+      // Block dispatch: workers atomically claim the next pending SBN
+      // from `_pool->next_sbn`, fill their scratch (memcpy → Reset →
+      // EncodeSymbol loop) and write Symbol::data pointers into the
+      // SourceBlock for the pump. They then wait for the pump's emit
+      // path to mark the block complete (signalled via
+      // check_source_block_completion → released[sbn]) before
+      // recycling their scratch for the next claim.
+      struct WorkerSlot {
+        std::vector<char> scratch;
+        std::array<EncSlot, 2> enc_slots;
+        std::thread thread;
+      };
+      struct PoolState {
+        // Per-SBN flags. Sized to Z in start_pool() and never resized.
+        std::vector<std::atomic<bool>> ready;
+        std::vector<std::atomic<bool>> released;
+        std::atomic<int>  next_sbn{0};
+        std::atomic<bool> stop{false};
+
+        std::mutex              mtx;
+        std::condition_variable ready_cv;     // pump waits, workers notify
+        std::condition_variable released_cv;  // workers wait, pump notifies
+
+        std::vector<WorkerSlot> workers;
+      };
+      std::unique_ptr<PoolState> _pool;
+      // Base pointer to the SourceBlock array workers operate on.
+      // Derived in prepare_for_emit() on the first call from the
+      // pump-supplied SourceBlock& (which lives inside File's
+      // _source_blocks vector — stable for the File's lifetime, and
+      // hence for the RaptorFEC's lifetime). Workers index
+      // `_src_blocks_data[sbn]` by SBN.
+      LibFlute::SourceBlock* _src_blocks_data = nullptr;
+
+      void start_pool(std::size_t Z);
+      void stop_pool();
+      void worker_loop(unsigned worker_id);
+      void fill_block_into_worker_scratch(WorkerSlot& w,
+                                            LibFlute::SourceBlock& srcblk);
       // User file buffer + length, captured in create_blocks() so
       // prepare_for_emit() can stripe each block's source bytes into
       // _enc_scratch on demand without create_blocks having to walk
@@ -121,14 +182,19 @@ namespace LibFlute {
       void                  fill_block_into_scratch(LibFlute::SourceBlock& srcblk);
       void extract_finished_block(LibFlute::SourceBlock& srcblk, DecoderCtx& ctx);
 
-      // 15% repair-symbol overhead; protects against ~15% packet loss.
-      // (Smaller files may pack up to 10 symbols per packet but are
-      // less vulnerable to loss to begin with.)
-      const float surplus_packet_ratio = 1.15f;
+      // Repair-symbol overhead. Default of 1.15× protects against ~15%
+      // packet loss. The constructor overrides this from the caller's
+      // FEC-Redundancy-Level (TS 26.346 Rel-11 mbms2012 attribute, an
+      // integer percent ⇒ ratio = 1 + percent/100). Smaller files may
+      // pack up to 10 symbols per packet but are less vulnerable to
+      // loss to begin with.
+      float surplus_packet_ratio = 1.15f;
 
     public:
 
-      RaptorFEC(unsigned int transfer_length, unsigned int max_payload);
+      RaptorFEC(unsigned int transfer_length, unsigned int max_payload,
+                std::optional<unsigned> fec_redundancy_level = std::nullopt,
+                unsigned fec_worker_threads = 0);
 
       RaptorFEC() {};
 

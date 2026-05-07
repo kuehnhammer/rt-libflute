@@ -38,12 +38,14 @@ constexpr unsigned kFdtRepeatIntervalSeconds = 5;
 
 Encoder::Encoder(std::uint64_t tsi, unsigned mtu,
                   std::uint32_t rate_limit_kbps,
-                  PacketCallback packet_cb)
+                  PacketCallback packet_cb,
+                  unsigned fec_worker_threads)
     : _packet_cb(std::move(packet_cb)),
       _tsi(tsi),
       _max_payload(static_cast<std::uint32_t>(
           (mtu > kFixedAlcOverhead) ? (mtu - kFixedAlcOverhead) : 0)),
       _rate_limit_kbps(rate_limit_kbps),
+      _fec_worker_threads(fec_worker_threads),
       _packet_scratch(mtu) {
   constexpr std::uint32_t kDefaultMaxSourceBlockLength = 64;
   _fec_oti = FecOti{FecScheme::CompactNoCode, /*transfer_length*/ 0,
@@ -152,7 +154,8 @@ std::uint16_t Encoder::send(std::string content_location,
                               std::string content_type,
                               std::uint64_t expires_ntp_seconds,
                               char* data, std::size_t length,
-                              FecScheme fec_scheme, bool copy_buffer) {
+                              FileTransmissionConfig fec_config,
+                              bool copy_buffer) {
   const std::lock_guard<std::mutex> lock(_mutex);
   if (!data || length == 0) {
     return 0;
@@ -165,19 +168,46 @@ std::uint16_t Encoder::send(std::string content_location,
     _next_toi = 1;
   }
 
+  // Merge per-file FecOti over the encoder's FDT-Instance defaults.
+  // Caller-supplied non-sentinel values win; sentinel (0 / empty)
+  // inherits from `_fec_oti`. Mirrors MBMS reader semantics where an
+  // absent per-file FEC-OTI-* attribute falls back to the FDT-Instance
+  // default attribute on the root.
   FecOti file_oti = _fec_oti;
-  file_oti.encoding_id = fec_scheme;
+  file_oti.encoding_id = fec_config.oti.encoding_id;
+  if (fec_config.oti.encoding_symbol_length != 0) {
+    file_oti.encoding_symbol_length = fec_config.oti.encoding_symbol_length;
+  }
+  if (fec_config.oti.max_source_block_length != 0) {
+    file_oti.max_source_block_length = fec_config.oti.max_source_block_length;
+  }
+  if (fec_config.oti.max_number_of_encoding_symbols != 0) {
+    file_oti.max_number_of_encoding_symbols =
+        fec_config.oti.max_number_of_encoding_symbols;
+  }
+  if (fec_config.oti.instance_id != 0) {
+    file_oti.instance_id = fec_config.oti.instance_id;
+  }
+  if (!fec_config.oti.scheme_specific_info.empty()) {
+    file_oti.scheme_specific_info = fec_config.oti.scheme_specific_info;
+  }
 
   std::shared_ptr<File> file;
   try {
     file = std::make_shared<File>(toi, file_oti, std::move(content_location),
                                    std::move(content_type),
                                    expires_ntp_seconds, data, length,
-                                   copy_buffer);
+                                   copy_buffer,
+                                   fec_config.fec_redundancy_level,
+                                   _fec_worker_threads);
   } catch (const std::exception& ex) {
     spdlog::error("Encoder::send: failed to create File: {}", ex.what());
     return 0;
   }
+
+  // Carry the Rel-11 FEC-Redundancy-Level alongside the FEC OTI on the
+  // FileEntry so the FDT serialiser emits the mbms2012 attribute.
+  file->meta().fec_redundancy_level = fec_config.fec_redundancy_level;
 
   _fdt->add(file->meta());
   _files.insert({toi, file});

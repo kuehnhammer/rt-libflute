@@ -11,6 +11,7 @@ add_executable(libflute_tests
   unit/file_partitioning_test.cpp
   unit/file_test.cpp
   unit/decoder_test.cpp
+  unit/encoder_test.cpp
   unit/integration_test.cpp
   unit/overhead_test.cpp
   unit/stats_test.cpp

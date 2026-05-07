@@ -17,6 +17,7 @@
 
 #include <stddef.h>             // for size_t
 #include <stdint.h>             // for uint32_t, uint16_t, uint64_t
+#include <optional>             // for optional
 #include <string>               // for string
 #include <vector>               // for vector
 #include "FileDeliveryTable.h"  // for FileDeliveryTable, FileDeliveryTable:...
@@ -48,14 +49,16 @@ namespace LibFlute {
       *  @param copy_data Copy the buffer. If false (the default), the caller must ensure the buffer remains valid 
       *                   while the file is being transmitted.
       */
-      File(uint32_t toi, 
+      File(uint32_t toi,
           const FecOti& fec_oti,
           std::string content_location,
           std::string content_type,
           uint64_t expires,
           char* data,
           size_t length,
-          bool copy_data = false);
+          bool copy_data = false,
+          std::optional<unsigned> fec_redundancy_level = std::nullopt,
+          unsigned fec_worker_threads = 0);
 
      /**
       *  Default destructor.

@@ -15,6 +15,7 @@
 //
 #include <stddef.h>
 #include <stdint.h>
+#include <optional>
 #include <vector>
 #include "tinyxml2.h"
 
@@ -98,12 +99,60 @@ namespace LibFlute {
     uint32_t completed_symbol_count = 0;
   };
 
+  // FEC Object Transmission Information. Mirrors the FEC-OTI-* attribute
+  // set TS 26.346 §7.2.10.1 mandates on every FDT-Instance / File. Any
+  // field left at its sentinel value (0 / empty) is treated as "absent
+  // in the FDT" — the serialiser omits the attribute, and the FEC
+  // transformer fills in a scheme default and writes the resolved value
+  // back into this struct so the FDT round-trip captures it.
   struct FecOti {
     FecScheme encoding_id;
     uint64_t transfer_length;
     uint32_t encoding_symbol_length;
     uint32_t max_source_block_length;
     std::string scheme_specific_info;
+    // FEC-OTI-FEC-Instance-ID. Per RFC 5052 §4, only meaningful for
+    // Under-Specified FEC schemes (Encoding-ID 128–255). The schemes
+    // libflute itself emits — CompactNoCode (0), R10 (1), RaptorQ (6),
+    // RS GF(2^8) (5) — are all Fully-Specified and leave this at 0;
+    // the field exists for FDT round-trip fidelity on the receive
+    // side and forward-compatibility with under-specified schemes.
+    uint8_t instance_id = 0;
+    // FEC-OTI-Max-Number-of-Encoding-Symbols. Upper bound on the ESI
+    // a receiver may see for any source block (= K + max repair).
+    // Sentinel 0 means "let the FEC transformer derive it from the
+    // redundancy level" and the FDT serialiser omits the attribute.
+    uint32_t max_number_of_encoding_symbols = 0;
   };
+
+  // Per-file transmission config the caller hands to Encoder::send().
+  // Bundles the FEC-OTI-* fields (TS 26.346 §7.2.10.1) with the Rel-11
+  // FEC-Redundancy-Level attribute that lives next to FEC OTI in the
+  // FDT but is not itself part of FEC OTI. Implicitly constructible
+  // from FecScheme so call sites that only need to pick a scheme can
+  // still write `encoder.send(..., FecScheme::Raptor)` unchanged.
+  //
+  // Caller-supplied fields override the encoder's FDT-Instance defaults
+  // on a per-file basis (matching MBMS reader semantics for absent
+  // attributes). Sentinel values (0 / empty / nullopt) mean "inherit
+  // from the FDT-Instance default, then let the FEC transformer fill
+  // in what's still missing".
+  struct FileTransmissionConfig {
+    FecOti oti{};
+    // FEC-Redundancy-Level (Rel-11 mbms2012 attribute, xs:unsignedInt).
+    // Per-file repair overhead expressed as an integer percent: 15 ⇒
+    // K * 1.15 total symbols on the wire. nullopt ⇒ scheme default
+    // (Raptor / RaptorQ pick their own; CompactNoCode ignores).
+    std::optional<unsigned> fec_redundancy_level;
+
+    FileTransmissionConfig() = default;
+
+    // NOLINTNEXTLINE(google-explicit-constructor) — implicit conversion
+    // from FecScheme is the migration path for existing call sites.
+    FileTransmissionConfig(FecScheme scheme) {
+      oti.encoding_id = scheme;
+    }
+  };
+
 
 };

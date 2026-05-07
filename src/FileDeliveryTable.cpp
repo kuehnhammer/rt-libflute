@@ -222,6 +222,28 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     def_fec_encoding_symbol_length = strtoul(val, nullptr, 0);
   }
 
+  // TS 26.346 §7.2.10.1: the FEC-OTI-* attribute set on FDT-Instance
+  // also includes Instance-ID, Max-Number-of-Encoding-Symbols and
+  // Scheme-Specific-Info. All three serve as defaults for any File
+  // that omits its own override.
+  uint8_t def_fec_instance_id = 0;
+  val = fdt_instance->Attribute("FEC-OTI-FEC-Instance-ID");
+  if (val != nullptr) {
+    def_fec_instance_id = static_cast<uint8_t>(strtoul(val, nullptr, 0));
+  }
+
+  uint32_t def_fec_max_number_of_encoding_symbols = 0;
+  val = fdt_instance->Attribute("FEC-OTI-Max-Number-of-Encoding-Symbols");
+  if (val != nullptr) {
+    def_fec_max_number_of_encoding_symbols = strtoul(val, nullptr, 0);
+  }
+
+  std::string def_fec_scheme_specific_info;
+  val = fdt_instance->Attribute("FEC-OTI-Scheme-Specific-Info");
+  if (val != nullptr) {
+    def_fec_scheme_specific_info = val;
+  }
+
   for (auto* file = fdt_instance->FirstChildElement("File");
       file != nullptr; file = file->NextSiblingElement("File")) {
 
@@ -293,6 +315,25 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       encoding_symbol_length = strtoul(val, nullptr, 0);
     }
 
+    auto fec_instance_id = def_fec_instance_id;
+    val = file->Attribute("FEC-OTI-FEC-Instance-ID");
+    if (val != nullptr) {
+      fec_instance_id = static_cast<uint8_t>(strtoul(val, nullptr, 0));
+    }
+
+    auto fec_max_number_of_encoding_symbols =
+        def_fec_max_number_of_encoding_symbols;
+    val = file->Attribute("FEC-OTI-Max-Number-of-Encoding-Symbols");
+    if (val != nullptr) {
+      fec_max_number_of_encoding_symbols = strtoul(val, nullptr, 0);
+    }
+
+    auto fec_scheme_specific_info = def_fec_scheme_specific_info;
+    val = file->Attribute("FEC-OTI-Scheme-Specific-Info");
+    if (val != nullptr) {
+      fec_scheme_specific_info = val;
+    }
+
     if (fec_transformer && !fec_transformer->parse_fdt_info(file)) {
       throw std::runtime_error("Failed to parse fdt info for specific FEC data");
     }
@@ -340,7 +381,9 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
         transfer_length,
         encoding_symbol_length,
         max_source_block_length,
-        ""
+        fec_scheme_specific_info,
+        fec_instance_id,
+        fec_max_number_of_encoding_symbols,
     };
 
     FileEntry fe{};
@@ -438,6 +481,22 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
   root->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned)_global_fec_oti.encoding_id);
   root->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", (unsigned)_global_fec_oti.max_source_block_length);
   root->SetAttribute("FEC-OTI-Encoding-Symbol-Length", (unsigned)_global_fec_oti.encoding_symbol_length);
+  // TS 26.346 §7.2.10.1: emit Instance-ID / Max-Number-of-Encoding-Symbols
+  // / Scheme-Specific-Info on the FDT-Instance root only if the encoder's
+  // FDT-Instance defaults set them. Sentinel (0 / empty) ⇒ omit, matching
+  // the spec's "absent attribute = no default applies" semantics.
+  if (_global_fec_oti.instance_id != 0) {
+    root->SetAttribute("FEC-OTI-FEC-Instance-ID",
+                        (unsigned)_global_fec_oti.instance_id);
+  }
+  if (_global_fec_oti.max_number_of_encoding_symbols != 0) {
+    root->SetAttribute("FEC-OTI-Max-Number-of-Encoding-Symbols",
+                        (unsigned)_global_fec_oti.max_number_of_encoding_symbols);
+  }
+  if (!_global_fec_oti.scheme_specific_info.empty()) {
+    root->SetAttribute("FEC-OTI-Scheme-Specific-Info",
+                        _global_fec_oti.scheme_specific_info.c_str());
+  }
   // TS 26.346 cl. 7.2.10 + per-release XSDs: declare all the MBMS
   // namespaces this implementation may emit, plus the schema-version
   // namespace. Receivers expect these prefixes when reading the
@@ -497,6 +556,44 @@ auto LibFlute::FileDeliveryTable::to_string() const -> std::string {
     if (file.repair_limit_percentage.has_value()) {
       f->SetAttribute("mbms2025:Repair-Limit-Percentage",
                       *file.repair_limit_percentage);
+    }
+    // TS 26.346 §7.2.10.1: per-File FEC-OTI-* attributes override the
+    // FDT-Instance defaults. Emit only the fields that differ from the
+    // FDT-Instance default (sentinel 0 / empty inherits) so the FDT
+    // stays compact when every File shares the session defaults — the
+    // common case for homogeneous broadcasts.
+    if (file.fec_oti.encoding_id != _global_fec_oti.encoding_id) {
+      f->SetAttribute("FEC-OTI-FEC-Encoding-ID",
+                       (unsigned)file.fec_oti.encoding_id);
+    }
+    if (file.fec_oti.encoding_symbol_length != 0 &&
+        file.fec_oti.encoding_symbol_length !=
+            _global_fec_oti.encoding_symbol_length) {
+      f->SetAttribute("FEC-OTI-Encoding-Symbol-Length",
+                       (unsigned)file.fec_oti.encoding_symbol_length);
+    }
+    if (file.fec_oti.max_source_block_length != 0 &&
+        file.fec_oti.max_source_block_length !=
+            _global_fec_oti.max_source_block_length) {
+      f->SetAttribute("FEC-OTI-Maximum-Source-Block-Length",
+                       (unsigned)file.fec_oti.max_source_block_length);
+    }
+    if (file.fec_oti.instance_id != 0 &&
+        file.fec_oti.instance_id != _global_fec_oti.instance_id) {
+      f->SetAttribute("FEC-OTI-FEC-Instance-ID",
+                       (unsigned)file.fec_oti.instance_id);
+    }
+    if (file.fec_oti.max_number_of_encoding_symbols != 0 &&
+        file.fec_oti.max_number_of_encoding_symbols !=
+            _global_fec_oti.max_number_of_encoding_symbols) {
+      f->SetAttribute("FEC-OTI-Max-Number-of-Encoding-Symbols",
+                       (unsigned)file.fec_oti.max_number_of_encoding_symbols);
+    }
+    if (!file.fec_oti.scheme_specific_info.empty() &&
+        file.fec_oti.scheme_specific_info !=
+            _global_fec_oti.scheme_specific_info) {
+      f->SetAttribute("FEC-OTI-Scheme-Specific-Info",
+                       file.fec_oti.scheme_specific_info.c_str());
     }
     if (file.fec_transformer) {
       file.fec_transformer->add_fdt_info(f);
