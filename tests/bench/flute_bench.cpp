@@ -68,6 +68,7 @@
 #include "Encoder.h"
 #include "File.h"
 #include "FileDeliveryTable.h"
+#include "base64.h"
 #include "flute_types.h"
 #include "spdlog/spdlog.h"
 
@@ -106,6 +107,16 @@ struct ScenarioResult {
     std::uint64_t sub_block_size_target = 0;
     LibFlute::EncoderStats es{};
     LibFlute::DecoderStats ds{};
+    // Partitioner outputs the codec actually ran with, captured off
+    // the round-trip File's parsed FEC OTI. Z / N / Al come out of
+    // the scheme-specific-info byte layout (R10: Z(2)+N(1)+Al(1);
+    // RaptorQ: Z(1)+N(2)+Al(1)). Zero across all four for the
+    // CompactNoCode rows that have no FEC OTI to report.
+    std::uint32_t T   = 0;
+    std::uint32_t K   = 0;
+    std::uint32_t Z   = 0;
+    std::uint32_t N_  = 0;   // N collides with iostream stream manipulators / locale
+    std::uint8_t  Al  = 0;
 };
 
 // Inspect the LCT half-word TOI without round-tripping through
@@ -262,19 +273,60 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
            received->complete() &&
            received->length() == cfg.F &&
            std::memcmp(received->buffer(), data.get(), cfg.F) == 0;
+
+    if (received != nullptr) {
+        const auto& oti = received->meta().fec_oti;
+        r.T = oti.encoding_symbol_length;
+        r.K = oti.max_source_block_length;
+        // FecOti.scheme_specific_info on the receive side carries the
+        // base64-encoded XML attribute value verbatim (the parser
+        // doesn't decode it; only the FEC transformer does). Decode
+        // the 4-byte (Z, N, Al) blob here. Layout differs by scheme
+        // (RFC 5053 §3.2 vs RFC 6330 §3.4.2).
+        // CompactNoCode emits no SSI, so the field stays empty.
+        const auto raw = base64_decode(oti.scheme_specific_info);
+        if (raw.size() == 4) {
+            const auto b = [&](std::size_t i) -> std::uint32_t {
+                return static_cast<std::uint8_t>(raw[i]);
+            };
+            if (cfg.fec == LibFlute::FecScheme::RaptorQ) {
+                r.Z  =  b(0);
+                r.N_ = (b(1) << 8) | b(2);
+                r.Al =  static_cast<std::uint8_t>(b(3));
+            } else {
+                r.Z  = (b(0) << 8) | b(1);
+                r.N_ =  b(2);
+                r.Al =  static_cast<std::uint8_t>(b(3));
+            }
+        }
+    }
     return r;
 }
 
 void PrintHeader(unsigned mtu) {
     std::printf("== libflute round-trip benchmark (mtu=%u) ==\n\n", mtu);
-    std::printf("%-7s  %-13s  %-9s  %-7s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+    std::printf("%-7s  %-13s  %-9s  %-7s  %10s  %10s  %10s  %14s  %14s  %s\n",
                 "F (MB)", "FEC", "loss", "W",
-                "packets", "src syms", "rep syms",
-                "enc (ms)", "dec (ms)", "throughput", "overhead");
-    std::printf("%-7s  %-13s  %-9s  %-7s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+                "enc (ms)", "dec (ms)", "throughput", "overhead",
+                "K/T/Z/N/Al", "src+rep symbols");
+    std::printf("%-7s  %-13s  %-9s  %-7s  %10s  %10s  %10s  %14s  %14s  %s\n",
                 "-------", "-------------", "---------", "-------",
-                "------------", "------------", "------------",
-                "----------", "----------", "--------------", "--------");
+                "----------", "----------", "----------",
+                "--------------", "--------------",
+                "---------------");
+}
+
+// Compact rendering of the partitioner outputs the codec actually
+// ran with, sized to fit the new column. Empty for CompactNoCode
+// (no FEC OTI to report).
+inline std::string ParamsLabel(const ScenarioResult& r) {
+    if (r.fec == LibFlute::FecScheme::CompactNoCode || r.K == 0) {
+        return "-";
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%u/%u/%u/%u/%u",
+                   r.K, r.T, r.Z, r.N_, static_cast<unsigned>(r.Al));
+    return buf;
 }
 
 // Format W as a short human-readable suffix (e.g. "256K", "16M").
@@ -329,14 +381,20 @@ void PrintRow(const ScenarioResult& r) {
             ? 100.0 * static_cast<double>(r.es.repair_symbols_emitted) /
                   static_cast<double>(r.es.source_symbols_emitted)
             : 0.0;
-    std::printf("%-7.0f  %-13s  %-9s  %-7s  %12llu  %12llu  %12llu  %10.1f  %10.1f  %11.1f MB/s  %6.1f%% (%6.2f MB)\n",
+    char overhead_buf[24];
+    std::snprintf(overhead_buf, sizeof(overhead_buf), "%.1f%% (%.2f MB)",
+                   overhead_pct, mb_emitted - mb);
+    char syms_buf[40];
+    std::snprintf(syms_buf, sizeof(syms_buf), "%llu+%llu (%llu pk)",
+                   static_cast<unsigned long long>(r.es.source_symbols_emitted),
+                   static_cast<unsigned long long>(r.es.repair_symbols_emitted),
+                   static_cast<unsigned long long>(r.es.packets_emitted));
+    const auto params = ParamsLabel(r);
+    std::printf("%-7.0f  %-13s  %-9s  %-7s  %10.1f  %10.1f  %7.1f MB/s  %14s  %14s  %s\n",
                 mb, FecName(r.fec), loss_label,
                 WLabel(r.sub_block_size_target).c_str(),
-                static_cast<unsigned long long>(r.es.packets_emitted),
-                static_cast<unsigned long long>(r.es.source_symbols_emitted),
-                static_cast<unsigned long long>(r.es.repair_symbols_emitted),
                 DurationMs(r.encoder_time), DurationMs(r.decoder_time),
-                tput_mb_s, overhead_pct, mb_emitted - mb);
+                tput_mb_s, overhead_buf, params.c_str(), syms_buf);
 }
 
 std::vector<std::size_t> ParseSizesEnv() {
