@@ -8,10 +8,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
 
-set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror")
-set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror")
-set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")
-set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -O3")
+set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
+set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
+set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
+set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
+
+# Apply the warning discipline to libflute's own targets directly.
+# CMAKE_*_FLAGS_*_INIT only seeds the cache on first configure; an
+# integrator embedding libflute via add_subdirectory() may have their
+# own flags. target_compile_options below pins the lib's source to
+# the project's mandated discipline regardless of how it's consumed.
+set(LIBFLUTE_WARNING_FLAGS
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -80,6 +93,7 @@ target_sources(flute
   )
 
 target_include_directories(flute PUBLIC ${PROJECT_SOURCE_DIR}/include/)
+target_compile_options(flute PRIVATE ${LIBFLUTE_WARNING_FLAGS})
 
 if(ENABLE_RAPTOR)
   add_compile_definitions(RAPTOR_ENABLED)

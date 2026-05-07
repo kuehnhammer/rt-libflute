@@ -68,9 +68,9 @@ LibFlute::File::File(uint32_t toi,
     char* data,
     size_t length,
     bool copy_data,
-    std::optional<unsigned> fec_redundancy_level,
-    unsigned fec_worker_threads,
-    uint64_t sub_block_size_target)
+    [[maybe_unused]] std::optional<unsigned> fec_redundancy_level,
+    [[maybe_unused]] unsigned fec_worker_threads,
+    [[maybe_unused]] uint64_t sub_block_size_target)
 {
   if (data == nullptr) {
     spdlog::error("File pointer is null");

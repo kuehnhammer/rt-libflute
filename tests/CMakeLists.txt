@@ -22,6 +22,7 @@ target_link_libraries(libflute_tests
     flute
     GTest::gtest_main
 )
+target_compile_options(libflute_tests PRIVATE ${LIBFLUTE_WARNING_FLAGS})
 
 # Disable clang-tidy on the test TUs -- they intentionally exercise edge
 # cases (truncated buffers, malformed XML, etc.) that trip clang-tidy

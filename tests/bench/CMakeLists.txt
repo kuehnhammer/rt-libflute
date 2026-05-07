@@ -5,3 +5,4 @@
 add_executable(flute_bench flute_bench.cpp)
 set_target_properties(flute_bench PROPERTIES CXX_CLANG_TIDY "")
 target_link_libraries(flute_bench PRIVATE flute spdlog::spdlog pthread)
+target_compile_options(flute_bench PRIVATE ${LIBFLUTE_WARNING_FLAGS})

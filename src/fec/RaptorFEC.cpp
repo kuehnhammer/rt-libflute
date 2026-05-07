@@ -52,11 +52,13 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
                                 std::optional<unsigned> fec_redundancy_level,
                                 unsigned fec_worker_threads,
                                 std::uint64_t sub_block_size_target)
-    : F(fec_oti.transfer_length)
-    , P(fec_oti.encoding_symbol_length)
-    , _fec_worker_threads(fec_worker_threads)
+    // Init order matches member declaration order in RaptorFEC.h
+    // (Wreorder-ctor under -Werror).
+    : _fec_worker_threads(fec_worker_threads)
     , _bitstem_scheme(to_bitstem_scheme(fec_oti.encoding_id))
     , _fec_scheme(fec_oti.encoding_id)
+    , F(fec_oti.transfer_length)
+    , P(fec_oti.encoding_symbol_length)
 {
   if (fec_redundancy_level.has_value()) {
     surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
@@ -228,6 +230,9 @@ bool LibFlute::RaptorFEC::calculate_partitioning() {
 }
 
 void *LibFlute::RaptorFEC::allocate_file_buffer(int min_length) {
+  // min_length is only used by the assert; under NDEBUG (Release)
+  // the assert is gone and the param looks unused.
+  (void)min_length;
   assert(min_length <= (int)(Z * target_K(0) * T));
   return malloc(Z * target_K(0) * T);
 }

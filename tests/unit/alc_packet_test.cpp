@@ -225,7 +225,7 @@ TEST(AlcPacket, AcceptsExtFdtVersionTwoPerRfc6726) {
     // + TSI half + TOI half (offsets 0..11), so the HET=192 byte is at
     // offset 12 and the version+upper-nibble byte is at offset 13.
     ASSERT_EQ(buf[12], 192u);
-    buf[13] = static_cast<std::uint8_t>(2u << 4 | (0x12345u >> 16) & 0x0Fu);
+    buf[13] = static_cast<std::uint8_t>((2u << 4) | ((0x12345u >> 16) & 0x0Fu));
     auto p = Parse(buf);
     EXPECT_EQ(p.fdt_instance_id(), 0x12345u);
 }

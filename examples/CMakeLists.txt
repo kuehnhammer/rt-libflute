@@ -8,8 +8,8 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Werror -g3")
-set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -O3")
+set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror -g3")
+set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
 
 # Examples lean on the same dependencies the library does plus
 # (optionally) libpcap for the pcap-replay receiver.
@@ -36,6 +36,8 @@ set_target_properties(flute-transmitter flute-receiver
 
 target_link_libraries(flute-transmitter PRIVATE flute spdlog::spdlog pthread)
 target_link_libraries(flute-receiver    PRIVATE flute spdlog::spdlog pthread)
+target_compile_options(flute-transmitter PRIVATE ${LIBFLUTE_WARNING_FLAGS})
+target_compile_options(flute-receiver    PRIVATE ${LIBFLUTE_WARNING_FLAGS})
 
 if(PCAP_FOUND)
   add_executable(flute-pcap-receiver flute-pcap-receiver.cpp)
@@ -43,6 +45,7 @@ if(PCAP_FOUND)
     PROPERTIES CXX_CLANG_TIDY "${_example_no_tidy}")
   target_include_directories(flute-pcap-receiver SYSTEM PRIVATE ${PCAP_INCLUDEDIR})
   target_link_libraries(flute-pcap-receiver PRIVATE flute spdlog::spdlog pthread ${PCAP_LIBRARY})
+  target_compile_options(flute-pcap-receiver PRIVATE ${LIBFLUTE_WARNING_FLAGS})
 else()
   message(STATUS "libpcap not found; skipping flute-pcap-receiver example.")
 endif()

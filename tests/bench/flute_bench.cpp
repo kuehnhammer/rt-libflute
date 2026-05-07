@@ -117,15 +117,6 @@ inline std::uint16_t ToiOf(std::span<const std::uint8_t> packet) {
         (static_cast<std::uint16_t>(packet[10]) << 8) | packet[11]);
 }
 
-// LCT codepoint at offset 3 (the 4th byte of the LCT base header).
-// Maps directly to the FEC encoding ID — 0 = CompactNoCode, 1 = R10,
-// 6 = RaptorQ — which is what we need to choose the FEC Payload ID
-// byte layout when peeking at SBN/ESI below.
-inline std::uint8_t CodepointOf(std::span<const std::uint8_t> packet) {
-    if (packet.size() < 4) return 0xFFU;
-    return packet[3];
-}
-
 // FEC Payload ID lives at offset 12 (LCT base 4 + CCI 4 + TSI half 2 +
 // TOI half 2). Layout depends on the codepoint: R10 / CompactNoCode
 // pack SBN(16) + ESI(16) per RFC 5052 §3.4.1; RaptorQ uses
