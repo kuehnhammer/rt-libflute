@@ -110,8 +110,15 @@ LibFlute::File::File(uint32_t toi,
       _meta.fec_oti.transfer_length = length;
       break;
 #ifdef RAPTOR_ENABLED
-    case FecScheme::Raptor: {
-      auto raptor = std::make_shared<RaptorFEC>(length, fec_oti.encoding_symbol_length,
+    case FecScheme::Raptor:
+    case FecScheme::RaptorQ: {
+      // Hand the FecOti through directly so RaptorFEC can pick up the
+      // caller-supplied scheme + scheme-specific info (xMB / SDP path).
+      // We populate transfer_length on the FecOti before construction
+      // so RaptorFEC sees the final F.
+      FecOti raptor_oti = fec_oti;
+      raptor_oti.transfer_length = length;
+      auto raptor = std::make_shared<RaptorFEC>(raptor_oti,
                                                   fec_redundancy_level,
                                                   fec_worker_threads);
       _meta.fec_transformer = raptor;

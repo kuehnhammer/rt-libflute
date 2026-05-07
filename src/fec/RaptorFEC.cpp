@@ -33,50 +33,103 @@
 #include "spdlog/spdlog.h"
 #include "base64.h"
 
-LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_payload,
+namespace {
+// Map libflute's wire-level FecScheme to the bitstem-fec codec
+// selection enum. Throws on schemes RaptorFEC doesn't handle (those
+// are routed to other transformers / CompactNoCode upstream).
+bitstem::fec::Scheme to_bitstem_scheme(LibFlute::FecScheme s) {
+  switch (s) {
+    case LibFlute::FecScheme::Raptor:  return bitstem::fec::Scheme::kR10;
+    case LibFlute::FecScheme::RaptorQ: return bitstem::fec::Scheme::kRaptorQ;
+    default:
+      throw std::invalid_argument(
+          "RaptorFEC: unsupported FecScheme (only Raptor / RaptorQ)");
+  }
+}
+}  // namespace
+
+LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
                                 std::optional<unsigned> fec_redundancy_level,
                                 unsigned fec_worker_threads)
-    : F(transfer_length)
-    , P(max_payload)
+    : F(fec_oti.transfer_length)
+    , P(fec_oti.encoding_symbol_length)
     , _fec_worker_threads(fec_worker_threads)
+    , _bitstem_scheme(to_bitstem_scheme(fec_oti.encoding_id))
+    , _fec_scheme(fec_oti.encoding_id)
 {
   if (fec_redundancy_level.has_value()) {
     surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
   }
+
+  // Caller-supplied scheme-specific info path (xMB → SDP → libflute).
+  // Per TS 26.346 §7.2.10.1 + RFC 5053 §3.2 / RFC 6330 §3.4.2, SSI is
+  // 4 bytes carrying Z + N + Al; the byte allocation flips between
+  // schemes (R10: Z(2)+N(1)+Al(1); RaptorQ: Z(1)+N(2)+Al(1)). When
+  // present, those values override the autodetect path in
+  // calculate_partitioning() — the encoder honors what the caller
+  // (and therefore the receiver, via the FDT round-trip) was told.
+  if (fec_oti.scheme_specific_info.size() == 4) {
+    const auto& ssi = fec_oti.scheme_specific_info;
+    const auto b = [&](std::size_t i) {
+      return static_cast<std::uint32_t>(static_cast<std::uint8_t>(ssi[i]));
+    };
+    if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
+      Z  = b(0);
+      N  = (b(1) << 8) | b(2);
+      Al = b(3);
+    } else {
+      Z  = (b(0) << 8) | b(1);
+      N  = b(2);
+      Al = b(3);
+    }
+    _ssi_caller_supplied = true;
+  }
+
+  // Source-block / sub-block partitioning. T (symbol size) and Kt
+  // (total source-symbol count) are always derived from F + P; Z (and
+  // therefore KL/KS/ZL/ZS), N, and Al come either from caller-supplied
+  // SSI (the xMB / SDP path, _ssi_caller_supplied above) or from this
+  // autodetect path.
+  //
+  // K_max scales with the chosen scheme — RFC 5053 caps R10 at 8192
+  // source symbols per block; RFC 6330 §5.1.2 lets RaptorQ go up to
+  // 56403. Larger K_max means fewer blocks for the same Kt, which
+  // matters for large-file throughput on the RaptorQ path.
+  const unsigned int K_max =
+      (_fec_scheme == LibFlute::FecScheme::RaptorQ) ? 56403u : 8192u;
+
   double g = fmin( fmin(ceil((double)P*1024/(double)F), (double)P/(double)Al), 10.0f);
-  spdlog::debug("double g = fmin( fmin(ceil((double)P*1024/F), (double)P/(double)Al), 10.0f");
   spdlog::debug("G = {} = min( ceil({}*1024/{}), {}/{}, 10.0f)", g, P, F, P, Al);
   G = (unsigned int) g;
 
   T = (unsigned int) floor((double)P/(double)(Al*g)) * Al;
-  spdlog::debug("T = (unsigned int) floor((double)P/(double)(Al*g)) * Al");
   spdlog::debug("T = {} = floor({}/({}*{})) * {}", T, P, Al, g, Al);
-
   if (T % Al) {
-    spdlog::error(" Symbol size T should be a multiple of symbol alignment parameter Al");
+    spdlog::error("Symbol size T should be a multiple of symbol alignment parameter Al");
     throw std::runtime_error("Symbol size doesn't align");
   }
 
   Kt = ceil((double)F/(double)T);
-  spdlog::debug("double Kt = ceil((double)F/(double)T)");
   spdlog::debug("Kt = {} = ceil({}/{})", Kt, F, T);
-
-  if (Kt < 4) {
-    spdlog::error("Input file is too small, it must be a minimum of 4 Symbols");
+  if (Kt < 4 && _fec_scheme == LibFlute::FecScheme::Raptor) {
+    spdlog::error("R10 input is too small, it must be a minimum of 4 symbols");
     throw std::runtime_error("Input is less than 4 symbols");
   }
 
-  Z = (unsigned int) ceil((double)Kt/(double)8192);
-  spdlog::debug("Z = (unsigned int) ceil(Kt/8192)");
-  spdlog::debug("Z = {} = ceil({}/8192)", Z, Kt);
+  // Z: caller-supplied wins; otherwise spread Kt across the smallest
+  // number of blocks bounded by K_max.
+  if (!_ssi_caller_supplied) {
+    Z = (unsigned int) ceil((double)Kt / (double)K_max);
+    spdlog::debug("Z = {} = ceil({}/{}) (autodetect, K_max={})",
+                  Z, Kt, K_max, K_max);
+  } else {
+    spdlog::debug("Z = {} (caller-supplied via SSI)", Z);
+  }
 
-  // RFC 5053 §4.4.1.2: split Kt source symbols across Z source blocks
-  // as evenly as possible. Block i in [0, ZL) holds KL symbols;
-  // i in [ZL, Z) holds KS = KL - 1 (or KL if Kt is an exact multiple
-  // of Z). The earlier "K = min(Kt, 8192) + remainder-in-last-block"
-  // partitioning could leave the trailing block with K < kJKMinK = 4
-  // (e.g. Kt = 8195 → 3 symbols in the trailing block; bitstem-r10's
-  // Encoder::Create rejected it).
+  // RFC 5053 §4.4.1.2 / RFC 6330 §4.4: split Kt source symbols across Z
+  // source blocks as evenly as possible. Block i in [0, ZL) holds KL
+  // symbols; i in [ZL, Z) holds KS = KL - 1 (or KL if Kt is an exact
+  // multiple of Z).
   KS = Kt / Z;
   KL = (Kt % Z == 0) ? KS : (KS + 1);
   ZL = Kt - Z * KS;
@@ -85,9 +138,26 @@ LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_pa
   spdlog::debug("§4.4.1.2 partitioning: Z={} ZL={} ZS={} KL={} KS={}",
                 Z, ZL, ZS, KL, KS);
 
-  N = fmin( ceil( ceil((double)Kt/(double)Z) * (double)T/(double)W ), (double)T/(double)Al );
-  spdlog::debug("N = fmin( ceil( ceil(Kt/(double)Z) * (double)T/(double)W ) , (double)T/(double)Al )");
-  spdlog::debug("N = {} = min( ceil( ceil({}/{}) * {}/{} ) , {}/{} )", N, Kt, Z, T, W, T, Al);
+  // N: caller-supplied wins; otherwise the autodetect formula caps at
+  // 1 today regardless of what RFC 5053 §4.4 / RFC 6330 §4.4 would
+  // pick from (Kt, Z, T, W, Al). Both libflute (RaptorFEC::create_blocks
+  // assertion) and bitstem-fec (Encoder::Create rejects N>1) cap at
+  // 1 — the sub-block-interleaved path isn't implemented in either
+  // layer yet. The autodetect would otherwise pick N>1 at large K
+  // (RaptorQ K_max=56403 → multi-MB blocks easily trip the W=16 MB
+  // sub-block heuristic) and break the encode pipeline. When the
+  // codec's N>1 path lands, switch this back to the spec formula.
+  if (!_ssi_caller_supplied) {
+    N = 1;
+    spdlog::debug("N = 1 (autodetect; sub-block interleaving not yet "
+                   "implemented in codec)");
+  } else if (N != 1) {
+    throw std::runtime_error(
+        "RaptorFEC: caller-supplied N>1 in scheme-specific info, but "
+        "sub-block interleaving is not implemented yet");
+  } else {
+    spdlog::debug("N = {} (caller-supplied via SSI)", N);
+  }
 
   nof_source_symbols        = (unsigned int) Kt;
   nof_source_blocks         = Z;
@@ -95,6 +165,11 @@ LibFlute::RaptorFEC::RaptorFEC(unsigned int transfer_length, unsigned int max_pa
   large_source_block_length = KL * T;
   nof_large_source_blocks   = ZL;
 }
+
+LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme)
+    : _bitstem_scheme(to_bitstem_scheme(scheme))
+    , _fec_scheme(scheme)
+{}
 
 LibFlute::RaptorFEC::~RaptorFEC() {
   // Tear down the parallel-encode worker pool, if active. Idempotent
@@ -135,11 +210,11 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
                 sbn, nsymbs, blocksize);
 
   auto dec = bitstem::fec::fast::Decoder::Create(
-      static_cast<std::uint16_t>(nsymbs), T);
+      static_cast<std::uint16_t>(nsymbs), T, _bitstem_scheme);
   if (!dec.has_value()) {
-    spdlog::error("r10::fast::Decoder::Create failed for SBN {} K={}",
-                  sbn, nsymbs);
-    throw std::runtime_error("r10 decoder construction failed");
+    spdlog::error("bitstem::fec::Decoder::Create failed for SBN {} K={} scheme={}",
+                  sbn, nsymbs, static_cast<int>(_bitstem_scheme));
+    throw std::runtime_error("FEC decoder construction failed");
   }
 
   DecoderCtx ctx;
@@ -408,12 +483,18 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
   if (slot_ptr == nullptr) {
     for (auto& slot : _enc_slots) {
       if (!slot.enc.has_value()) {
-        auto enc = bitstem::fec::fast::Encoder::Create(
-            static_cast<std::uint16_t>(nsymbs), T);
+        bitstem::fec::EncoderParams params;
+        params.K      = static_cast<std::uint16_t>(nsymbs);
+        params.T      = static_cast<std::uint16_t>(T);
+        params.scheme = _bitstem_scheme;
+        params.Al     = static_cast<std::uint8_t>(Al);
+        params.N      = static_cast<std::uint16_t>(N);
+        auto enc = bitstem::fec::fast::Encoder::Create(params);
         if (!enc.has_value()) {
-          spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
-                        blockid, nsymbs);
-          throw std::runtime_error("Error creating r10 encoder");
+          spdlog::error("bitstem::fec::Encoder::Create failed for SBN {} K={} scheme={} Al={} N={}",
+                        blockid, nsymbs, static_cast<int>(_bitstem_scheme),
+                        params.Al, params.N);
+          throw std::runtime_error("Error creating FEC encoder");
         }
         slot.K   = static_cast<std::uint16_t>(nsymbs);
         slot.enc = std::move(*enc);
@@ -594,10 +675,15 @@ void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
   if (slot_ptr == nullptr) {
     for (auto& slot : w.enc_slots) {
       if (!slot.enc.has_value()) {
-        auto enc = bitstem::fec::fast::Encoder::Create(
-            static_cast<std::uint16_t>(nsymbs), T);
+        bitstem::fec::EncoderParams params;
+        params.K      = static_cast<std::uint16_t>(nsymbs);
+        params.T      = static_cast<std::uint16_t>(T);
+        params.scheme = _bitstem_scheme;
+        params.Al     = static_cast<std::uint8_t>(Al);
+        params.N      = static_cast<std::uint16_t>(N);
+        auto enc = bitstem::fec::fast::Encoder::Create(params);
         if (!enc.has_value()) {
-          throw std::runtime_error("Error creating r10 encoder");
+          throw std::runtime_error("Error creating FEC encoder");
         }
         slot.K   = static_cast<std::uint16_t>(nsymbs);
         slot.enc = std::move(*enc);
@@ -712,10 +798,19 @@ bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {
     throw std::runtime_error("Missing or malformed scheme specific info for Raptor FEC");
   }
 
-  Z  = (uint8_t)scheme_specific_info[0] << 8;
-  Z |= (uint8_t)scheme_specific_info[1];
-  N  = (uint8_t)scheme_specific_info[2];
-  Al = (uint8_t)scheme_specific_info[3];
+  // SSI byte layout flips between schemes (RFC 5053 §3.2 vs RFC 6330
+  // §3.4.2): R10 = Z(2) + N(1) + Al(1); RaptorQ = Z(1) + N(2) + Al(1).
+  if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
+    Z  =  (uint8_t)scheme_specific_info[0];
+    N  = ((uint8_t)scheme_specific_info[1] << 8) |
+          (uint8_t)scheme_specific_info[2];
+    Al =  (uint8_t)scheme_specific_info[3];
+  } else {
+    Z  = ((uint8_t)scheme_specific_info[0] << 8) |
+          (uint8_t)scheme_specific_info[1];
+    N  =  (uint8_t)scheme_specific_info[2];
+    Al =  (uint8_t)scheme_specific_info[3];
+  }
 
   if (T % Al) {
     throw std::runtime_error(
@@ -743,18 +838,27 @@ bool LibFlute::RaptorFEC::parse_fdt_info(tinyxml2::XMLElement *file) {
 }
 
 bool LibFlute::RaptorFEC::add_fdt_info(tinyxml2::XMLElement *file) {
-  file->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned) FecScheme::Raptor);
+  file->SetAttribute("FEC-OTI-FEC-Encoding-ID", (unsigned) _fec_scheme);
   file->SetAttribute("FEC-OTI-Encoding-Symbol-Length", T);
   file->SetAttribute("FEC-OTI-Maximum-Source-Block-Length", K);
 
-  // RFC 6726 §3.4.2 + RFC 5053 §3.2: the per-FEC-scheme parameters
-  // ride in a single FEC-OTI-Scheme-Specific-Info attribute as
-  // base64. Layout for Raptor: Z(2 bytes BE) + N(1) + Al(1) = 4 bytes.
+  // RFC 5053 §3.2 / RFC 6330 §3.4.2: the per-FEC-scheme parameters
+  // ride in a single 4-byte FEC-OTI-Scheme-Specific-Info attribute as
+  // base64. Byte allocation differs by scheme:
+  //   R10:     Z(2) + N(1) + Al(1)
+  //   RaptorQ: Z(1) + N(2) + Al(1)
   std::array<unsigned char, 4> ssi{};
-  ssi[0] = static_cast<unsigned char>((Z >> 8) & 0xFFU);
-  ssi[1] = static_cast<unsigned char>(Z & 0xFFU);
-  ssi[2] = static_cast<unsigned char>(N);
-  ssi[3] = static_cast<unsigned char>(Al);
+  if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
+    ssi[0] = static_cast<unsigned char>(Z & 0xFFU);
+    ssi[1] = static_cast<unsigned char>((N >> 8) & 0xFFU);
+    ssi[2] = static_cast<unsigned char>(N & 0xFFU);
+    ssi[3] = static_cast<unsigned char>(Al);
+  } else {
+    ssi[0] = static_cast<unsigned char>((Z >> 8) & 0xFFU);
+    ssi[1] = static_cast<unsigned char>(Z & 0xFFU);
+    ssi[2] = static_cast<unsigned char>(N);
+    ssi[3] = static_cast<unsigned char>(Al);
+  }
   std::string ssi_b64 = base64_encode({ssi.begin(), ssi.end()}, ssi.size());
   file->SetAttribute("FEC-OTI-Scheme-Specific-Info", ssi_b64.c_str());
 

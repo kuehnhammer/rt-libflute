@@ -192,13 +192,40 @@ namespace LibFlute {
       // loss to begin with.
       float surplus_packet_ratio = 1.15f;
 
+      // FEC scheme picked at construction. Maps to bitstem::fec::Scheme
+      // for Encoder / Decoder Create calls. Default kR10 keeps the
+      // pre-multi-scheme call shape for the receive-side empty ctor.
+      bitstem::fec::Scheme _bitstem_scheme = bitstem::fec::Scheme::kR10;
+      // Wire-level FEC-Encoding-ID — also recorded so AlcPacket /
+      // EncodingSymbol scheme dispatch can reach the right SSI byte
+      // layout and FEC-Payload-ID width.
+      LibFlute::FecScheme _fec_scheme = LibFlute::FecScheme::Raptor;
+      // True iff Z / N / Al came from a caller-supplied
+      // FEC-OTI-Scheme-Specific-Info on construction (xMB / SDP path).
+      // calculate_partitioning() then preserves them instead of
+      // recomputing from F / T / W; the autodetect path is the
+      // libflute-internal-driven default when the caller leaves SSI
+      // empty.
+      bool _ssi_caller_supplied = false;
+
     public:
 
-      RaptorFEC(unsigned int transfer_length, unsigned int max_payload,
+      // Encoder-side ctor. Consumes a populated FecOti — the caller
+      // (File::File transmit ctor) provides scheme + transfer length +
+      // max payload + (optional) caller-supplied scheme-specific info.
+      // When `fec_oti.scheme_specific_info` is 4 bytes, Z/N/Al are
+      // parsed out of it (per the scheme's RFC 5053 / RFC 6330 byte
+      // layout) and used verbatim during partitioning instead of being
+      // recomputed.
+      RaptorFEC(const FecOti& fec_oti,
                 std::optional<unsigned> fec_redundancy_level = std::nullopt,
                 unsigned fec_worker_threads = 0);
 
-      RaptorFEC() {};
+      // Decoder-side empty ctor. The scheme is supplied so AlcPacket /
+      // EncodingSymbol can dispatch on the correct FEC-Payload-ID width
+      // before parse_fdt_info has had a chance to populate the rest.
+      explicit RaptorFEC(LibFlute::FecScheme scheme);
+      RaptorFEC() : RaptorFEC(LibFlute::FecScheme::Raptor) {}
 
       ~RaptorFEC() override;
 

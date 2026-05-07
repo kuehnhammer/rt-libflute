@@ -135,7 +135,8 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_
   switch (_global_fec_oti.encoding_id){
 #ifdef RAPTOR_ENABLED
     case FecScheme::Raptor:
-    _fdt_fec_transformer = std::make_unique<RaptorFEC>();
+    case FecScheme::RaptorQ:
+    _fdt_fec_transformer = std::make_unique<RaptorFEC>(_global_fec_oti.encoding_id);
     break;
 #endif
     default:
@@ -294,8 +295,12 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     switch (encoding_id){
 #ifdef RAPTOR_ENABLED
       case (int) FecScheme::Raptor:
-        fec_transformer = std::make_shared<RaptorFEC>();
-      spdlog::debug("Received FDT entry for a raptor encoded file");
+        fec_transformer = std::make_shared<RaptorFEC>(FecScheme::Raptor);
+        spdlog::debug("Received FDT entry for an R10 (Raptor) encoded file");
+        break;
+      case (int) FecScheme::RaptorQ:
+        fec_transformer = std::make_shared<RaptorFEC>(FecScheme::RaptorQ);
+        spdlog::debug("Received FDT entry for a RaptorQ encoded file");
         break;
 #endif
       default:

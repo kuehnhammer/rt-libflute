@@ -10,14 +10,15 @@
 //
 // Scenarios:
 //   F = 10 MB / 100 MB / 500 MB,
-//   FEC = CompactNoCode (no overhead) and Raptor (gated on
-//         RAPTOR_ENABLED, ~15% surplus per RaptorFEC's
-//         surplus_packet_ratio = 1.15).
+//   FEC = CompactNoCode (no overhead),
+//         R10     (RFC 5053, K_max = 8192,  ~15% surplus default),
+//         RaptorQ (RFC 6330, K_max = 56403, ~15% surplus default).
+//   Both Raptor / RaptorQ scenarios are gated on RAPTOR_ENABLED.
 //
 // Defaults can be overridden via env vars:
 //   FLUTE_BENCH_SIZES_MB="10,100"      // comma-separated
 //   FLUTE_BENCH_MTU=1500
-//   FLUTE_BENCH_SKIP_RAPTOR=1          // skip Raptor scenarios
+//   FLUTE_BENCH_SKIP_RAPTOR=1          // skip both R10 and RaptorQ scenarios
 //   FLUTE_BENCH_DROP_EVERY=20          // drop every Nth file packet
 //                                      // (TOI ≠ 0). Exercises Raptor's
 //                                      // repair path; CompactNoCode would
@@ -92,7 +93,8 @@ inline std::uint16_t ToiOf(std::span<const std::uint8_t> packet) {
 const char* FecName(LibFlute::FecScheme s) {
     switch (s) {
         case LibFlute::FecScheme::CompactNoCode: return "CompactNoCode";
-        case LibFlute::FecScheme::Raptor:        return "Raptor";
+        case LibFlute::FecScheme::Raptor:        return "R10";
+        case LibFlute::FecScheme::RaptorQ:       return "RaptorQ";
         default:                                  return "?";
     }
 }
@@ -274,6 +276,7 @@ int main() {
         PrintRow(r);
 #ifdef RAPTOR_ENABLED
         if (!skip_raptor) {
+            // R10
             auto rr = RunScenario(F, LibFlute::FecScheme::Raptor, mtu,
                                   0, no_decode);
             PrintRow(rr);
@@ -281,6 +284,15 @@ int main() {
                 auto rl = RunScenario(F, LibFlute::FecScheme::Raptor,
                                       mtu, drop_every, no_decode);
                 PrintRow(rl);
+            }
+            // RaptorQ
+            auto rq = RunScenario(F, LibFlute::FecScheme::RaptorQ, mtu,
+                                  0, no_decode);
+            PrintRow(rq);
+            if (drop_every > 0) {
+                auto rql = RunScenario(F, LibFlute::FecScheme::RaptorQ,
+                                        mtu, drop_every, no_decode);
+                PrintRow(rql);
             }
         }
 #else

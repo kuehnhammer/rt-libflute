@@ -154,8 +154,11 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
     case 1:
       _fec_oti.encoding_id = FecScheme::Raptor;
       break;
+    case 6:
+      _fec_oti.encoding_id = FecScheme::RaptorQ;
+      break;
     default:
-      throw std::runtime_error("Only the Compact No-Code and Raptor FEC schemes are supported");
+      throw std::runtime_error("Only Compact No-Code, R10 and RaptorQ FEC schemes are supported");
   }
 
   auto expected_header_len = 2 +
@@ -324,6 +327,8 @@ LibFlute::AlcPacket::AlcPacket(uint16_t tsi, uint16_t toi,
     lct_header->codepoint = 0;
   } else if (_fec_oti.encoding_id == LibFlute::FecScheme::Raptor) {
     lct_header->codepoint = 1;
+  } else if (_fec_oti.encoding_id == LibFlute::FecScheme::RaptorQ) {
+    lct_header->codepoint = 6;
   } else {
     throw std::runtime_error("Unsupported FEC scheme");
   }

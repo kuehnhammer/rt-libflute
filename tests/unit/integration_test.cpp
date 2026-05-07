@@ -270,4 +270,41 @@ INSTANTIATE_TEST_SUITE_P(
                "_drop1in" + std::to_string(std::get<2>(info.param));
     });
 
+// RaptorQ (RFC 6330) round-trip. Wire-format is symmetric with R10
+// at the libflute layer (LCT codepoint 6, FEC Payload ID = SBN(8) +
+// ESI(24), 4-byte SSI laid out as Z(1)+N(2)+Al(1)). Codec is the
+// in-tree reference RaptorQ implementation in bitstem-fec.
+class RaptorQRoundTrip
+    : public ::testing::TestWithParam<std::tuple<std::size_t, unsigned>> {};
+
+TEST_P(RaptorQRoundTrip, FileBytesMatchAfterTransport) {
+    const auto [F, mtu] = GetParam();
+    const auto data = MakeBuffer(F);
+
+    auto result = RoundTrip(data, mtu, /*tsi=*/16,
+                              LibFlute::FecScheme::RaptorQ);
+
+    ASSERT_NE(result.received, nullptr);
+    EXPECT_TRUE(result.received->complete());
+    ASSERT_EQ(result.received->length(), F);
+    EXPECT_EQ(std::memcmp(result.received->buffer(), data.data(), F), 0)
+        << "received buffer differs from sent (F=" << F << ", mtu=" << mtu << ")";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Sizes, RaptorQRoundTrip,
+    ::testing::Values(
+        // RaptorQ K range starts at 1 (vs R10's 4) so smaller files
+        // round-trip too. K_max = 56403 keeps even multi-MB files
+        // inside a single source block, which makes the partitioning
+        // path different from the multi-block R10 case at the same F.
+        std::make_tuple<std::size_t, unsigned>(4096U,    1500U),
+        std::make_tuple<std::size_t, unsigned>(65536U,   1500U),
+        std::make_tuple<std::size_t, unsigned>(200000U,  1500U)
+        ),
+    [](const ::testing::TestParamInfo<RaptorQRoundTrip::ParamType>& info) {
+        return "F" + std::to_string(std::get<0>(info.param)) + "_mtu" +
+               std::to_string(std::get<1>(info.param));
+    });
+
 #endif  // RAPTOR_ENABLED

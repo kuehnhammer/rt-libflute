@@ -54,14 +54,25 @@ auto LibFlute::EncodingSymbol::from_payload(char* encoded_data, size_t data_len,
   switch (fec_oti.encoding_id) {
     case FecScheme::CompactNoCode:
     case FecScheme::Raptor:
+      // RFC 5052 §3.4.1 / RFC 5053 §3.2: FEC Payload ID = SBN(16) + ESI(16).
       source_block_number = ntohs(read_unaligned<uint16_t>(encoded_data));
       encoded_data += 2;
       encoding_symbol_id = ntohs(read_unaligned<uint16_t>(encoded_data));
       encoded_data += 2;
       data_len -= 4;
       break;
+    case FecScheme::RaptorQ: {
+      // RFC 6330 §3.2: FEC Payload ID = SBN(8) + ESI(24).
+      source_block_number = static_cast<uint8_t>(encoded_data[0]);
+      encoding_symbol_id  = (static_cast<uint8_t>(encoded_data[1]) << 16) |
+                            (static_cast<uint8_t>(encoded_data[2]) << 8)  |
+                             static_cast<uint8_t>(encoded_data[3]);
+      encoded_data += 4;
+      data_len     -= 4;
+      break;
+    }
     default:
-      throw std::runtime_error("Invalid FEC encoding ID. Only 2 FEC types are currently supported: compact no-code or raptor");
+      throw std::runtime_error("Invalid FEC encoding ID. Supported: CompactNoCode, R10, RaptorQ.");
   }
 
   if (fec_oti.encoding_symbol_length == 0) {
@@ -101,14 +112,27 @@ auto LibFlute::EncodingSymbol::to_payload(const std::vector<EncodingSymbol>& sym
   switch (fec_oti.encoding_id) {
     case FecScheme::CompactNoCode:
     case FecScheme::Raptor:
+      // RFC 5052 §3.4.1 / RFC 5053 §3.2: SBN(16) + ESI(16).
       write_unaligned_u16(ptr, htons(first_symbol->source_block_number()));
       ptr += 2;
       write_unaligned_u16(ptr, htons(first_symbol->id()));
       ptr += 2;
       len += 4;
       break;
+    case FecScheme::RaptorQ: {
+      // RFC 6330 §3.2: SBN(8) + ESI(24).
+      const auto sbn = first_symbol->source_block_number();
+      const auto esi = first_symbol->id();
+      ptr[0] = static_cast<char>(sbn & 0xFFU);
+      ptr[1] = static_cast<char>((esi >> 16) & 0xFFU);
+      ptr[2] = static_cast<char>((esi >>  8) & 0xFFU);
+      ptr[3] = static_cast<char>( esi        & 0xFFU);
+      ptr += 4;
+      len += 4;
+      break;
+    }
     default:
-      throw std::runtime_error("Invalid FEC encoding ID. Only 2 FEC types are currently supported: compact no-code or raptor");
+      throw std::runtime_error("Invalid FEC encoding ID. Supported: CompactNoCode, R10, RaptorQ.");
   }
 
   for (const auto& symbol : symbols) {
@@ -126,6 +150,11 @@ auto LibFlute::EncodingSymbol::decode_to(char* buffer, size_t max_length) const 
   switch (_fec_scheme) {
     case FecScheme::CompactNoCode:
     case FecScheme::Raptor:
+    case FecScheme::RaptorQ:
+      // All three schemes carry the symbol bytes verbatim in the
+      // encoding-symbol payload at this layer — RFC 5053 / RFC 6330
+      // systematic property. The codec-specific repair logic happens
+      // upstream in the FecTransformer, not here.
       if (_data_len <= max_length) {
         memcpy(buffer, _encoded_data, _data_len);
       }
@@ -141,6 +170,7 @@ auto LibFlute::EncodingSymbol::encode_to(char* buffer, size_t max_length) const 
     default:
     case FecScheme::CompactNoCode:
     case FecScheme::Raptor:
+    case FecScheme::RaptorQ:
       if (_data_len <= max_length) {
         memcpy(buffer, _encoded_data, _data_len);
         return _data_len;
