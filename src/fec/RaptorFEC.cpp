@@ -215,11 +215,21 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
   spdlog::debug("Constructing r10 decoder for SBN {}: K={} blocksize={}",
                 sbn, nsymbs, blocksize);
 
-  auto dec = bitstem::fec::fast::Decoder::Create(
-      static_cast<std::uint16_t>(nsymbs), T, _bitstem_scheme);
+  // Mirrors the encode-side EncoderParams plumbing: scheme + Al + N
+  // come from the parsed FEC OTI's scheme-specific info (set in
+  // parse_fdt_info) and flow verbatim into the codec, so the
+  // decoder's sub-block layout matches what the sender declared.
+  bitstem::fec::DecoderParams params;
+  params.K      = static_cast<std::uint16_t>(nsymbs);
+  params.T      = static_cast<std::uint16_t>(T);
+  params.scheme = _bitstem_scheme;
+  params.Al     = static_cast<std::uint8_t>(Al);
+  params.N      = static_cast<std::uint16_t>(N);
+  auto dec = bitstem::fec::fast::Decoder::Create(params);
   if (!dec.has_value()) {
-    spdlog::error("bitstem::fec::Decoder::Create failed for SBN {} K={} scheme={}",
-                  sbn, nsymbs, static_cast<int>(_bitstem_scheme));
+    spdlog::error("bitstem::fec::Decoder::Create failed for SBN {} K={} scheme={} Al={} N={}",
+                  sbn, nsymbs, static_cast<int>(_bitstem_scheme),
+                  params.Al, params.N);
     throw std::runtime_error("FEC decoder construction failed");
   }
 
