@@ -479,4 +479,71 @@ INSTANTIATE_TEST_SUITE_P(
                std::to_string(std::get<1>(info.param));
     });
 
+// Partition-derivation tests. R10 uses RFC 5053 §4.2 (W bounds N
+// directly); RaptorQ uses RFC 6330 §4.3 (WS bounds K_per_block,
+// driving Z, leaving N close to 1). The two algorithms differ
+// fundamentally in how W / WS shapes the resulting (Z, K, N) tuple
+// and the wire-format conformance for a TS 26.346 / 5G-MAG receiver
+// depends on libflute picking the right one per scheme.
+//
+// These tests construct RaptorFEC directly so they can read the
+// resolved Z / K / N off the public fields (RaptorFEC.h declares
+// them public for exactly this kind of inspection).
+#include "fec/RaptorFEC.h"
+
+TEST(RaptorPartitioning, R10UsesRfc5053_4_2_SmallWForcesNGreaterThan1) {
+    LibFlute::FecOti oti{};
+    oti.encoding_id            = LibFlute::FecScheme::Raptor;
+    oti.transfer_length        = 50ULL * 1024ULL * 1024ULL;
+    oti.encoding_symbol_length = 1456;  // P (= mtu-44 at mtu=1500)
+    LibFlute::RaptorFEC raptor(oti, /*redundancy=*/std::nullopt,
+                                /*workers=*/0,
+                                /*W=*/256ULL * 1024ULL);  // TS 26.346 R10
+    // RFC 5053 §4.2: K_max=8192 bounds Z; W=256 KB drives N>1 once
+    // K_per_block * T exceeds W. At F=50 MB / T=1456:
+    //   Kt ≈ 36011, Z = ceil(Kt/8192) = 5, KL ≈ 7203,
+    //   N = min(ceil(KL*T/W), T/Al) = min(40, 364) = 40
+    EXPECT_GE(raptor.Z, 5u);
+    EXPECT_GT(raptor.N, 1u)
+        << "R10 with TS 26.346-normative W=256 KB should pick N>1 per "
+           "RFC 5053 §4.2; got N=" << raptor.N;
+}
+
+TEST(RaptorPartitioning, RaptorQUsesRfc6330_4_3_WSBoundsKPerBlock) {
+    LibFlute::FecOti oti{};
+    oti.encoding_id            = LibFlute::FecScheme::RaptorQ;
+    oti.transfer_length        = 50ULL * 1024ULL * 1024ULL;
+    oti.encoding_symbol_length = 1456;
+    LibFlute::RaptorFEC raptor(oti, /*redundancy=*/std::nullopt,
+                                /*workers=*/0,
+                                /*WS=*/16ULL * 1024ULL * 1024ULL);
+    // RFC 6330 §4.3: WS bounds K_per_block × T, driving Z.
+    //   Kt ≈ 36011, Kt * T = 52432016 ≈ 50 MB
+    //   Z by K'_max = ceil(36011/56403) = 1
+    //   Z by WS    = ceil(50 MB / 16 MB) = 4
+    //   Z = max(1, 4) = 4 ⇒ K_per_block ≈ 9003, fits in WS
+    //   With Z chosen this way, K*T ≤ WS by construction, so N=1.
+    EXPECT_EQ(raptor.Z, 4u)
+        << "RaptorQ at WS=16 MB / F=50 MB should partition into 4 "
+           "blocks per RFC 6330 §4.3; got Z=" << raptor.Z;
+    EXPECT_EQ(raptor.N, 1u)
+        << "RaptorQ §4.3 partitioning should keep N=1 by construction "
+           "(WS bounds K, not N); got N=" << raptor.N;
+}
+
+TEST(RaptorPartitioning, RaptorQClampsToKPrimeMaxAtVeryLargeF) {
+    // Pathological large-F that would exceed K'_max if WS alone were
+    // permissive. Verify the K'_max ceiling kicks in.
+    LibFlute::FecOti oti{};
+    oti.encoding_id            = LibFlute::FecScheme::RaptorQ;
+    oti.transfer_length        = 1ULL * 1024ULL * 1024ULL * 1024ULL;  // 1 GiB
+    oti.encoding_symbol_length = 1456;
+    LibFlute::RaptorFEC raptor(oti, std::nullopt, 0,
+                                64ULL * 1024ULL * 1024ULL);  // huge WS
+    // Kt ≈ 737280. With WS huge, Z by WS would be small, but K'_max
+    // forces Z ≥ ceil(Kt/56403) = 14.
+    EXPECT_GE(raptor.Z, 14u);
+    EXPECT_LE(raptor.K, 56403u);
+}
+
 #endif  // RAPTOR_ENABLED

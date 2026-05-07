@@ -120,14 +120,49 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
     throw std::runtime_error("Input is less than 4 symbols");
   }
 
-  // Z: caller-supplied wins; otherwise spread Kt across the smallest
-  // number of blocks bounded by K_max.
+  // Z: caller-supplied wins; otherwise dispatch on scheme.
+  //
+  // RFC 5053 §4.2 (R10): only K_max bounds Z; W shapes N below.
+  // RFC 6330 §4.3 (RaptorQ): WS additionally bounds K_per_block * T
+  //   so the codec's working memory per source block fits in WS.
+  //   K_max provides a hard ceiling on Z.
   if (!_ssi_caller_supplied) {
-    Z = (unsigned int) ceil((double)Kt / (double)K_max);
-    spdlog::debug("Z = {} = ceil({}/{}) (autodetect, K_max={})",
-                  Z, Kt, K_max, K_max);
+    const std::uint64_t z_by_kmax =
+        (static_cast<std::uint64_t>(Kt) + K_max - 1ULL) / K_max;
+    if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
+      const std::uint64_t z_by_ws = (W > 0)
+          ? (static_cast<std::uint64_t>(Kt) * T + W - 1ULL) / W
+          : 1ULL;
+      Z = static_cast<unsigned int>(std::max(z_by_kmax, z_by_ws));
+      spdlog::debug("Z = {} = max(ceil(Kt/K'_max)={}, ceil(Kt*T/WS)={}) "
+                    "(RFC 6330 §4.3, K'_max={}, WS={})",
+                    Z, z_by_kmax, z_by_ws, K_max, W);
+    } else {
+      Z = static_cast<unsigned int>(z_by_kmax);
+      spdlog::debug("Z = {} = ceil(Kt/K_max) (RFC 5053 §4.2, K_max={})",
+                    Z, K_max);
+    }
+    if (Z < 1u) Z = 1u;
   } else {
     spdlog::debug("Z = {} (caller-supplied via SSI)", Z);
+  }
+
+  // Wire-format SBN range cap. R10 (RFC 5053 §3.2) uses a 16-bit SBN
+  // → at most 65536 source blocks per object; RaptorQ (RFC 6330 §3.2)
+  // uses an 8-bit SBN → 256 max. If the autodetect produced Z over
+  // the cap (typically because the caller supplied a too-small WS for
+  // a large RaptorQ object) the partition is wire-incompatible and
+  // we refuse rather than silently clamping. The fix is operator-side:
+  // increase WS or split the file.
+  const std::uint64_t z_wire_cap =
+      (_fec_scheme == LibFlute::FecScheme::RaptorQ) ? 256ULL : 65536ULL;
+  if (Z > z_wire_cap) {
+    throw std::runtime_error(std::string(
+        "RaptorFEC: partitioning produced Z=") + std::to_string(Z) +
+        " source blocks, exceeding the wire-format SBN cap of " +
+        std::to_string(z_wire_cap) + " for this scheme. Increase WS "
+        "(FileTransmissionConfig::sub_block_size_target) or split the "
+        "object.");
   }
 
   // RFC 5053 §4.4.1.2 / RFC 6330 §4.4: split Kt source symbols across Z
@@ -142,25 +177,29 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
   spdlog::debug("§4.4.1.2 partitioning: Z={} ZL={} ZS={} KL={} KS={}",
                 Z, ZL, ZS, KL, KS);
 
-  // N: caller-supplied wins; otherwise the standard derivation
-  // formula from RFC 5053 §4.2 / RFC 6330 §4.3:
+  // N: caller-supplied wins; otherwise dispatch on scheme.
   //
-  //   N = min( ceil( ceil(Kt/Z) * T / W ), T / Al )
+  // RFC 5053 §4.2 (R10): N is the codec's cache-friendliness knob —
+  //   small W spawns more sub-blocks per source block. The formula
+  //   N = min(ceil(ceil(Kt/Z)·T/W), T/Al) caps N at the per-Al
+  //   ceiling. TS 26.346-conformant R10 file delivery uses W=256 KB
+  //   which intentionally produces N>1 for multi-MiB blocks.
   //
-  // The result is constrained to [1, T/Al]. With the default W=16 MB
-  // (and FileTransmissionConfig::sub_block_size_target == 0) the
-  // formula collapses to N=1 for our typical broadcast file sizes —
-  // matching the pre-N>1 behaviour and keeping the codec on its
-  // tested path. Caller-driven smaller W (e.g. TS 26.346 §B.3.4.1's
-  // 256 KB for R10 file delivery) lets the autodetect pick N>1, at
-  // which point the codec must support sub-block interleaving — if
-  // it doesn't, Encoder::Create returns nullopt and send() reports
-  // back to the caller; no silent miscoding.
+  // RFC 6330 §4.3 (RaptorQ): WS is consumed in the Z computation
+  //   above (so K_per_block · T ≤ WS by construction). Sub-block
+  //   partitioning isn't needed for working-memory reasons and the
+  //   spec leaves N=1 in the standard derivation. We follow.
   if (!_ssi_caller_supplied) {
-    N = fmin( ceil( ceil((double)Kt / (double)Z) * (double)T / (double)W ),
-              (double)T / (double)Al );
-    if (N < 1u) N = 1u;
-    spdlog::debug("N = {} (autodetect, W={}, T={}, Al={})", N, W, T, Al);
+    if (_fec_scheme == LibFlute::FecScheme::RaptorQ) {
+      N = 1u;
+      spdlog::debug("N = 1 (RFC 6330 §4.3; WS already absorbed in Z)");
+    } else {
+      N = fmin( ceil( ceil((double)Kt / (double)Z) * (double)T / (double)W ),
+                (double)T / (double)Al );
+      if (N < 1u) N = 1u;
+      spdlog::debug("N = {} (RFC 5053 §4.2, W={}, T={}, Al={})",
+                    N, W, T, Al);
+    }
   } else {
     spdlog::debug("N = {} (caller-supplied via SSI)", N);
   }

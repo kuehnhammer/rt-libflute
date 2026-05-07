@@ -384,16 +384,23 @@ int main() {
     }
     const bool no_decode = std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr;
 
-    // Sub-block size target W (RFC 5053 §4.2 / RFC 6330 §4.3 input).
-    // TS 26.346 §B.3.4.1 mandates W=256 KB for R10 file delivery and
-    // doesn't pin RaptorQ; we use 256 KB as the bench default for both
-    // schemes so the autodetect picks N>1 on multi-MB blocks and the
-    // codec's sub-block-interleaved path is what we measure. Override
-    // with FLUTE_BENCH_W_BYTES=N (in bytes) — useful for sweep
-    // comparisons against the legacy 16 MB N=1 regime.
-    std::uint64_t bench_w = 256ULL * 1024ULL;
+    // Per-scheme sub-block size target W. RFC 5053 §4.2 and RFC 6330
+    // §4.3 use W differently:
+    //   * R10 (§4.2): W bounds N (sub-blocks per source block); Z is
+    //     K_max-bounded only. TS 26.346 §B.3.4.1 mandates 256 KB for
+    //     MBMS file delivery — our default.
+    //   * RaptorQ (§4.3): WS bounds K·T (per-block working memory),
+    //     driving Z. Setting WS too small forces Z past RaptorQ's
+    //     8-bit SBN wire-format ceiling (256). 16 MB is the typical
+    //     deployment value; RFC 6330 leaves it as a knob.
+    // FLUTE_BENCH_W_BYTES=N overrides BOTH defaults (sweep mode);
+    // unset uses the per-scheme values above.
+    std::uint64_t bench_w_r10     = 256ULL * 1024ULL;
+    std::uint64_t bench_w_raptorq = 16ULL * 1024ULL * 1024ULL;
     if (const char* w = std::getenv("FLUTE_BENCH_W_BYTES"); w && *w) {
-        bench_w = std::strtoull(w, nullptr, 10);
+        const auto v = std::strtoull(w, nullptr, 10);
+        bench_w_r10     = v;
+        bench_w_raptorq = v;
     }
 
     // Default Raptor / RaptorQ scenarios run with a low repair budget
@@ -428,7 +435,9 @@ int main() {
                 sc.mtu                   = mtu;
                 sc.targeted_drops        = kSrcDrops;
                 sc.redundancy_level      = kBenchRedundancyPercent;
-                sc.sub_block_size_target = bench_w;
+                sc.sub_block_size_target =
+                    (fec == LibFlute::FecScheme::Raptor) ? bench_w_r10
+                                                         : bench_w_raptorq;
                 sc.no_decode             = no_decode;
                 PrintRow(RunScenario(sc));
 
@@ -445,7 +454,8 @@ int main() {
 #else
         (void)skip_raptor;
         (void)drop_every;
-        (void)bench_w;
+        (void)bench_w_r10;
+        (void)bench_w_raptorq;
 #endif
         std::fflush(stdout);
     }
