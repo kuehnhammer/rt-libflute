@@ -199,7 +199,8 @@ std::uint16_t Encoder::send(std::string content_location,
                                    expires_ntp_seconds, data, length,
                                    copy_buffer,
                                    fec_config.fec_redundancy_level,
-                                   _fec_worker_threads);
+                                   _fec_worker_threads,
+                                   fec_config.sub_block_size_target);
   } catch (const std::exception& ex) {
     spdlog::error("Encoder::send: failed to create File: {}", ex.what());
     return 0;

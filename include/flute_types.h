@@ -15,6 +15,7 @@
 //
 #include <stddef.h>
 #include <stdint.h>
+#include <cstdint>
 #include <optional>
 #include <vector>
 #include "tinyxml2.h"
@@ -144,6 +145,16 @@ namespace LibFlute {
     // K * 1.15 total symbols on the wire. nullopt ⇒ scheme default
     // (Raptor / RaptorQ pick their own; CompactNoCode ignores).
     std::optional<unsigned> fec_redundancy_level;
+    // Sub-block size target W (RFC 5053 §4.2 / RFC 6330 §4.3 input).
+    // Drives the autodetect for N (the number of sub-blocks per source
+    // block). Sentinel 0 ⇒ use the scheme-internal default (currently
+    // 16 MB across schemes — keeps N=1 and backward-compatible until
+    // the codec ships sub-block interleaving). For TS 26.346-conformant
+    // R10 file delivery the spec-mandated value is 256 KB (§B.3.4.1);
+    // RaptorQ leaves it as a deployment knob (RFC 6330 §4.3).
+    // Caller-driven so xMB / SDP-supplied derivation inputs reach
+    // RaptorFEC's partitioning verbatim.
+    std::uint64_t sub_block_size_target = 0;
 
     FileTransmissionConfig() = default;
 

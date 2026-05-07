@@ -270,6 +270,91 @@ INSTANTIATE_TEST_SUITE_P(
                "_drop1in" + std::to_string(std::get<2>(info.param));
     });
 
+// FileTransmissionConfig::sub_block_size_target (= W in the RFC's
+// notation) drives the autodetect for N (sub-blocks per source
+// block). With the default W=16 MB the autodetect lands on N=1 for
+// every realistic broadcast file, which is what the codec accepts
+// today. This test covers the param-flow for a W large enough that
+// N still autodetects to 1 — proves the plumbing works end-to-end
+// without depending on bitstem-fec's sub-block-interleave path
+// being implemented.
+TEST(RaptorWConfig, LargeWStillRoundTripsAtN1) {
+    constexpr std::size_t F = 200000;
+    constexpr unsigned    mtu = 1500;
+    const auto data = MakeBuffer(F);
+
+    LibFlute::Decoder decoder(/*tsi=*/16);
+    std::shared_ptr<LibFlute::File> received;
+    decoder.register_completion_callback(
+        [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });
+
+    LibFlute::Encoder encoder(
+        /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
+        [&](std::span<const std::uint8_t> p) {
+            decoder.feed_packet(p);
+            return true;
+        });
+
+    LibFlute::FileTransmissionConfig cfg;
+    cfg.oti.encoding_id = LibFlute::FecScheme::Raptor;
+    cfg.sub_block_size_target = 16ULL * 1024ULL * 1024ULL;  // 16 MB → N=1
+
+    auto data_copy = data;
+    auto toi = encoder.send("w-test.bin", "application/octet-stream",
+                              LibFlute::Encoder::seconds_since_epoch() + 60,
+                              data_copy.data(), data_copy.size(), cfg,
+                              /*copy_buffer=*/false);
+    ASSERT_NE(toi, 0U);
+    encoder.flush();
+
+    ASSERT_NE(received, nullptr);
+    EXPECT_TRUE(received->complete());
+    ASSERT_EQ(received->length(), F);
+    EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0);
+}
+
+// Small W (TS 26.346 §B.3.4.1's normative 256 KB for R10 file
+// delivery) makes the autodetect formula pick N>1 for blocks larger
+// than W — which today causes bitstem-fec's Encoder::Create to
+// return nullopt because sub-block interleaving isn't implemented
+// yet. The test is **disabled** until the codec ships N>1; once it
+// does, drop the DISABLED_ prefix and this becomes the regression
+// guard for sub-block correctness.
+TEST(RaptorWConfig, DISABLED_SmallWForcesNGreaterThan1) {
+    constexpr std::size_t F = 1u << 20;  // 1 MiB
+    constexpr unsigned    mtu = 1500;
+    const auto data = MakeBuffer(F);
+
+    LibFlute::Decoder decoder(/*tsi=*/16);
+    std::shared_ptr<LibFlute::File> received;
+    decoder.register_completion_callback(
+        [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });
+
+    LibFlute::Encoder encoder(
+        /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
+        [&](std::span<const std::uint8_t> p) {
+            decoder.feed_packet(p);
+            return true;
+        });
+
+    LibFlute::FileTransmissionConfig cfg;
+    cfg.oti.encoding_id = LibFlute::FecScheme::Raptor;
+    cfg.sub_block_size_target = 256ULL * 1024ULL;  // TS 26.346 §B.3.4.1 R10
+
+    auto data_copy = data;
+    auto toi = encoder.send("w-test.bin", "application/octet-stream",
+                              LibFlute::Encoder::seconds_since_epoch() + 60,
+                              data_copy.data(), data_copy.size(), cfg,
+                              /*copy_buffer=*/false);
+    ASSERT_NE(toi, 0U);
+    encoder.flush();
+
+    ASSERT_NE(received, nullptr);
+    EXPECT_TRUE(received->complete());
+    ASSERT_EQ(received->length(), F);
+    EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0);
+}
+
 // RaptorQ (RFC 6330) round-trip. Wire-format is symmetric with R10
 // at the libflute layer (LCT codepoint 6, FEC Payload ID = SBN(8) +
 // ESI(24), 4-byte SSI laid out as Z(1)+N(2)+Al(1)). Codec is the

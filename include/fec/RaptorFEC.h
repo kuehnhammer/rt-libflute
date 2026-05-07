@@ -217,9 +217,15 @@ namespace LibFlute {
       // parsed out of it (per the scheme's RFC 5053 / RFC 6330 byte
       // layout) and used verbatim during partitioning instead of being
       // recomputed.
+      //
+      // `sub_block_size_target` (= W in the RFC's notation) drives the
+      // autodetect for N. Sentinel 0 ⇒ default (16 MB; biases the
+      // autodetect toward N=1 for codec compatibility while
+      // bitstem-fec's sub-block-interleaved path is still landing).
       RaptorFEC(const FecOti& fec_oti,
                 std::optional<unsigned> fec_redundancy_level = std::nullopt,
-                unsigned fec_worker_threads = 0);
+                unsigned fec_worker_threads = 0,
+                std::uint64_t sub_block_size_target = 0);
 
       // Decoder-side empty ctor. The scheme is supplied so AlcPacket /
       // EncodingSymbol can dispatch on the correct FEC-Payload-ID width
@@ -258,7 +264,13 @@ namespace LibFlute {
       unsigned int F;          // object size in bytes
       unsigned int Al = 4;     // symbol alignment
       unsigned int T;          // symbol size in bytes
-      unsigned long W = 16*1024*1024; // sub-block size target -- 16 MB keeps N=1
+      // Sub-block size target (RFC 5053 §4.2 / RFC 6330 §4.3 input).
+      // Default 16 MB biases the autodetect toward N=1, which is what
+      // the codec accepts today. Caller can override per-file via
+      // FileTransmissionConfig::sub_block_size_target — once
+      // bitstem-fec ships sub-block interleaving, the natural default
+      // for R10 flips to TS 26.346 §B.3.4.1's 256 KB.
+      unsigned long W = 16UL * 1024UL * 1024UL;
       unsigned int G;          // symbols per packet
       unsigned int Z;          // number of source blocks
       unsigned int N;          // sub-blocks per source block

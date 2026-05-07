@@ -50,7 +50,8 @@ bitstem::fec::Scheme to_bitstem_scheme(LibFlute::FecScheme s) {
 
 LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
                                 std::optional<unsigned> fec_redundancy_level,
-                                unsigned fec_worker_threads)
+                                unsigned fec_worker_threads,
+                                std::uint64_t sub_block_size_target)
     : F(fec_oti.transfer_length)
     , P(fec_oti.encoding_symbol_length)
     , _fec_worker_threads(fec_worker_threads)
@@ -59,6 +60,9 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
 {
   if (fec_redundancy_level.has_value()) {
     surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
+  }
+  if (sub_block_size_target != 0) {
+    W = static_cast<unsigned long>(sub_block_size_target);
   }
 
   // Caller-supplied scheme-specific info path (xMB → SDP → libflute).
@@ -138,23 +142,25 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
   spdlog::debug("§4.4.1.2 partitioning: Z={} ZL={} ZS={} KL={} KS={}",
                 Z, ZL, ZS, KL, KS);
 
-  // N: caller-supplied wins; otherwise the autodetect formula caps at
-  // 1 today regardless of what RFC 5053 §4.4 / RFC 6330 §4.4 would
-  // pick from (Kt, Z, T, W, Al). Both libflute (RaptorFEC::create_blocks
-  // assertion) and bitstem-fec (Encoder::Create rejects N>1) cap at
-  // 1 — the sub-block-interleaved path isn't implemented in either
-  // layer yet. The autodetect would otherwise pick N>1 at large K
-  // (RaptorQ K_max=56403 → multi-MB blocks easily trip the W=16 MB
-  // sub-block heuristic) and break the encode pipeline. When the
-  // codec's N>1 path lands, switch this back to the spec formula.
+  // N: caller-supplied wins; otherwise the standard derivation
+  // formula from RFC 5053 §4.2 / RFC 6330 §4.3:
+  //
+  //   N = min( ceil( ceil(Kt/Z) * T / W ), T / Al )
+  //
+  // The result is constrained to [1, T/Al]. With the default W=16 MB
+  // (and FileTransmissionConfig::sub_block_size_target == 0) the
+  // formula collapses to N=1 for our typical broadcast file sizes —
+  // matching the pre-N>1 behaviour and keeping the codec on its
+  // tested path. Caller-driven smaller W (e.g. TS 26.346 §B.3.4.1's
+  // 256 KB for R10 file delivery) lets the autodetect pick N>1, at
+  // which point the codec must support sub-block interleaving — if
+  // it doesn't, Encoder::Create returns nullopt and send() reports
+  // back to the caller; no silent miscoding.
   if (!_ssi_caller_supplied) {
-    N = 1;
-    spdlog::debug("N = 1 (autodetect; sub-block interleaving not yet "
-                   "implemented in codec)");
-  } else if (N != 1) {
-    throw std::runtime_error(
-        "RaptorFEC: caller-supplied N>1 in scheme-specific info, but "
-        "sub-block interleaving is not implemented yet");
+    N = fmin( ceil( ceil((double)Kt / (double)Z) * (double)T / (double)W ),
+              (double)T / (double)Al );
+    if (N < 1u) N = 1u;
+    spdlog::debug("N = {} (autodetect, W={}, T={}, Al={})", N, W, T, Al);
   } else {
     spdlog::debug("N = {} (caller-supplied via SSI)", N);
   }
@@ -720,10 +726,15 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
   if (!bytes_read) {
     throw std::invalid_argument("bytes_read pointer shouldn't be null");
   }
-  if (N != 1) {
-    throw std::invalid_argument(
-        "Currently the encoding only supports 1 sub-block per block");
-  }
+  // N>1 (sub-block interleaving) is the codec's concern: the K·T
+  // contiguous source bytes per block ARE the on-symbol layout per
+  // RFC 5053 §4.4.1.2 / RFC 6330 §4.4.1.2. libflute hands them to
+  // bitstem-fec and the lib re-lays-out into N sub-block buffers
+  // internally. From File / SourceBlock POV the stride stays at T
+  // bytes per ESI regardless of N. If the caller-or-autodetect picks
+  // an N the codec doesn't yet support, Encoder::Create returns
+  // nullopt and the per-block fill-into-scratch path throws — the
+  // failure surfaces at first emit, not at create_blocks time.
 
   std::vector<LibFlute::SourceBlock> block_vec(Z);
   *bytes_read = 0;
