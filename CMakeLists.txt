@@ -50,15 +50,14 @@ configure_file("include/Version.h.in" "Version.h")
 set(CMAKE_CXX_CLANG_TIDY clang-tidy)
 
 if(ENABLE_RAPTOR)
-  message(STATUS "Compiling bitstem-r10 (lib/raptor/) for Raptor FEC support. To disable support build with -DENABLE_RAPTOR=OFF")
-  # bitstem-r10 is a CMake-aware C++ submodule with its own targets.
-  # Suppress its tests/benchmarks when embedded -- we only need the
-  # `r10` static library.
-  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  set(R10_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-  add_subdirectory(${PROJECT_SOURCE_DIR}/lib/raptor)
+  # bitstem-fec is shipped as a binary distribution under
+  # lib/bitstem-fec/<platform>/, version-pinned by lib/bitstem-fec/VERSION.
+  # The cmake module below picks the matching tarball, extracts to the
+  # build tree, and exposes an imported target `bitstem::fec`. See
+  # lib/bitstem-fec/README.md for the version-update workflow.
+  include(BitstemFEC)
 else()
-  message(STATUS "Skipping bitstem-r10 build. To enable Raptor FEC support build with -DENABLE_RAPTOR=ON")
+  message(STATUS "Skipping bitstem-fec integration. To enable Raptor / RaptorQ FEC support build with -DENABLE_RAPTOR=ON")
 endif()
 
 # Single library target. Encoder + Decoder are the public surface; the
@@ -90,10 +89,13 @@ if(ENABLE_RAPTOR)
     PUBLIC
       include/fec/RaptorFEC.h
   )
-  # bitstem-r10's own CMakeLists exports the include path on the `r10`
-  # target (target_include_directories(r10 PUBLIC include)), so linking
-  # is enough.
-  target_link_libraries(flute LINK_PUBLIC r10)
+  # bitstem::fec is the imported target declared by BitstemFEC.cmake;
+  # IMPORTED_LOCATION points at the extracted libfec.so and
+  # INTERFACE_INCLUDE_DIRECTORIES exposes <bitstem/fec/fec.hpp> on the
+  # consumer's include path. Dynamic-link only — keeps libflute's
+  # closed-source consumers (5gbc-rx) LGPL-clean per the rq-branch
+  # integration plan.
+  target_link_libraries(flute LINK_PUBLIC bitstem::fec)
 endif()
 
 target_link_libraries(flute

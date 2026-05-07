@@ -29,14 +29,16 @@
 #include "fec/FecTransformer.h"
 #include "flute_types.h"
 
-#include "bitstem/r10/r10.hpp"
+#include "bitstem/fec/fec.hpp"
 
 namespace tinyxml2 { class XMLElement; }
 
 namespace LibFlute {
-  // Glue between LibFlute's FEC abstraction and the bitstem::r10::fast
-  // Encoder / Decoder. One r10::fast::Decoder is constructed per source
-  // block on first received symbol and reused across all subsequent
+  // Glue between LibFlute's FEC abstraction and the bitstem::fec::fast
+  // Encoder / Decoder (currently in R10 mode; RaptorQ lands as a
+  // sibling RaptorQFEC class wired against the same lib via
+  // Scheme::kRaptorQ). One Decoder is constructed per source block on
+  // first received symbol and reused across all subsequent
   // process_symbol() calls for that block.
   class RaptorFEC : public FecTransformer {
 
@@ -52,7 +54,7 @@ namespace LibFlute {
       // on the receive side -> decoder), so they share storage as an
       // optional + a map respectively.
       struct DecoderCtx {
-        std::optional<bitstem::r10::fast::Decoder> dec;
+        std::optional<bitstem::fec::fast::Decoder> dec;
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
         bool decoded = false;           // cached IsDecoded() so we don't re-call TryDecode
@@ -104,7 +106,7 @@ namespace LibFlute {
       // 2-slot map is sufficient.
       struct EncSlot {
         std::uint16_t K = 0;
-        std::optional<bitstem::r10::fast::Encoder> enc;
+        std::optional<bitstem::fec::fast::Encoder> enc;
       };
       std::array<EncSlot, 2> _enc_slots;
       // SBN currently materialised in _enc_scratch, or -1 if scratch

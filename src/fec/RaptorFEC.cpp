@@ -134,7 +134,7 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
   spdlog::debug("Constructing r10 decoder for SBN {}: K={} blocksize={}",
                 sbn, nsymbs, blocksize);
 
-  auto dec = bitstem::r10::fast::Decoder::Create(
+  auto dec = bitstem::fec::fast::Decoder::Create(
       static_cast<std::uint16_t>(nsymbs), T);
   if (!dec.has_value()) {
     spdlog::error("r10::fast::Decoder::Create failed for SBN {} K={}",
@@ -408,7 +408,7 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
   if (slot_ptr == nullptr) {
     for (auto& slot : _enc_slots) {
       if (!slot.enc.has_value()) {
-        auto enc = bitstem::r10::fast::Encoder::Create(
+        auto enc = bitstem::fec::fast::Encoder::Create(
             static_cast<std::uint16_t>(nsymbs), T);
         if (!enc.has_value()) {
           spdlog::error("r10::fast::Encoder::Create failed for SBN {} K={}",
@@ -594,7 +594,7 @@ void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
   if (slot_ptr == nullptr) {
     for (auto& slot : w.enc_slots) {
       if (!slot.enc.has_value()) {
-        auto enc = bitstem::r10::fast::Encoder::Create(
+        auto enc = bitstem::fec::fast::Encoder::Create(
             static_cast<std::uint16_t>(nsymbs), T);
         if (!enc.has_value()) {
           throw std::runtime_error("Error creating r10 encoder");
