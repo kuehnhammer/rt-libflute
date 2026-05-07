@@ -428,6 +428,7 @@ received File buffer equals the sent buffer. No sockets, no asio.
 |-------|-----|---------------|--------|
 | 2 | EncodingSymbol::from_payload last-symbol len() == T | RFC 5052 §9.1 | `324953a` |
 | 2 | AlcPacket EXT_NOP/AUTH/TIME `+= 3` over/under-advance | RFC 5651 §3.2.5 | `324953a` |
+| - | AlcPacket switch had no `default:` arm; unknown HET advanced `hdr_ptr` only by the prologue, mis-parsing all subsequent extensions | RFC 5651 §3.2.5 (forward-compat) | (this commit) |
 | 2 | calculate_md5 broken `< 0` error path (unsigned return) | (libflute internal) | `324953a` |
 | 2 | EXT_FDT rejected FLUTE v2 | RFC 6726 §3.4.1 | `324953a` |
 | 2 | AlcPacket producer: redundant codepoint overwrite (latent) | RFC 6726 §5 | `324953a` |

@@ -32,6 +32,8 @@ using libflute_test::BuildExtFdt;
 using libflute_test::BuildExtFtiCompactNoCode;
 using libflute_test::BuildExtNop;
 using libflute_test::BuildExtTime;
+using libflute_test::BuildExtUnknownHelBearing;
+using libflute_test::BuildExtUnknownImplicit;
 using libflute_test::DataPacketSpec;
 using libflute_test::EncodeLctBase;
 using libflute_test::LctV1Base;
@@ -423,6 +425,76 @@ TEST(AlcPacket, ParsesExtAuthAndExtTimeFollowedByExtFdt) {
 
     auto p = Parse(buf);
     EXPECT_EQ(p.fdt_instance_id(), 0x55555u);
+}
+
+// -----------------------------------------------------------------------------
+// RFC 5651 §3.2.5: unknown / unrecognised header extensions MUST be
+// skipped per their declared HEL (HEL-bearing) or fixed 4-byte width
+// (implicit). A receiver that doesn't advance hdr_ptr by the full
+// extension width on the unknown-HET branch reads garbage from the
+// previous extension's content on the next iteration. The class of
+// regression upstream 5G-MAG fixed in commit 8588703 — we never had
+// the unknown-HET arm at all in our switch.
+
+TEST(AlcPacket, SkipsUnknownHelBearingExtensionAndParsesFollowingExtFdt) {
+    // base + CCI + TSI/TOI half + unknown(HEL=2, 8B) + EXT_FDT(4B)
+    //   = 4 + 4 + 4 + 8 + 4 = 24B = 6 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 6;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);
+    AppendBE16(buf, 13);              // TSI
+    AppendBE16(buf, 17);              // TOI
+    // HET=42 is not in the EXT_NOP/AUTH/TIME/FTI/FDT/CENC registered
+    // set; it has to be treated as forward-compat unknown. HEL=2 ⇒
+    // 8 content bytes the parser must skip.
+    AppendBytes(buf,
+        BuildExtUnknownHelBearing(/*het=*/42, /*hel=*/2));
+    AppendBytes(buf,
+        BuildExtFdt(/*flute_version=*/1,
+                    /*instance_id=*/0xABCDE));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.tsi(), 13u);
+    EXPECT_EQ(p.toi(), 17u);
+    EXPECT_EQ(p.fdt_instance_id(), 0xABCDEu)
+        << "EXT_FDT instance ID was misparsed because the parser "
+           "didn't skip the preceding unknown extension's content "
+           "bytes";
+}
+
+TEST(AlcPacket, SkipsUnknownImplicitExtensionAndParsesFollowingExtFdt) {
+    // base + CCI + TSI/TOI half + unknown(implicit, 4B) + EXT_FDT(4B)
+    //   = 4 + 4 + 4 + 4 + 4 = 20B = 5 words
+    LctV1Base h;
+    h.version = 1;
+    h.half_word_flag = 1;
+    h.codepoint = 0;
+    h.lct_header_len = 5;
+
+    std::vector<std::uint8_t> buf;
+    AppendBytes(buf, EncodeLctBase(h));
+    AppendBE32(buf, 0);
+    AppendBE16(buf, 21);              // TSI
+    AppendBE16(buf, 99);              // TOI
+    // HET=200 is implicit-length (>=128), unrecognised. Parser must
+    // advance by 4 bytes total (1 byte HET + 3 content) before
+    // continuing to the next extension.
+    AppendBytes(buf,
+        BuildExtUnknownImplicit(/*het=*/200));
+    AppendBytes(buf,
+        BuildExtFdt(/*flute_version=*/1,
+                    /*instance_id=*/0x13579));
+
+    auto p = Parse(buf);
+    EXPECT_EQ(p.tsi(), 21u);
+    EXPECT_EQ(p.toi(), 99u);
+    EXPECT_EQ(p.fdt_instance_id(), 0x13579u);
 }
 
 // -----------------------------------------------------------------------------

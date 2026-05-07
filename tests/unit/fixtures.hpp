@@ -124,6 +124,25 @@ inline std::vector<std::uint8_t> BuildExtTime(std::uint8_t hel) {
 }
 
 // ---------------------------------------------------------------------------
+// Unknown HEL-bearing extension (HET < 128, declared length in HEL words).
+// Used to verify the parser skips unrecognised extensions without
+// mis-parsing subsequent ones — the RFC 5651 §3.2.5 forward-compat
+// requirement that anything outside the registered HET set must be
+// skipped per its declared length, never as a fixed offset.
+inline std::vector<std::uint8_t> BuildExtUnknownHelBearing(std::uint8_t het,
+                                                            std::uint8_t hel) {
+    std::vector<std::uint8_t> b(static_cast<std::size_t>(hel) * 4U, 0U);
+    b[0] = het;
+    b[1] = hel;
+    return b;
+}
+
+// Unknown implicit-length extension (HET >= 128, fixed 4-byte width, no
+// HEL byte).
+inline std::array<std::uint8_t, 4> BuildExtUnknownImplicit(std::uint8_t het) {
+    return {het, 0, 0, 0};
+}
+
 // EXT_FDT (RFC 6726 §3.4.1) — 4 bytes total, het >= 128 (no HEL byte).
 //   byte 0: HET = 192
 //   byte 1: V (4 bits, FLUTE version) | upper 4 bits of FDT-Instance ID

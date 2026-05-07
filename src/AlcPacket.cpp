@@ -283,6 +283,22 @@ LibFlute::AlcPacket::AlcPacket(char* data, size_t len)
         consumed += 3;
         break;
       }
+      default: {
+        // RFC 5651 §3.2.5: unknown header extensions MUST be skipped
+        // per their declared length so subsequent extensions still
+        // parse at the right offset. Each known case above advances
+        // hdr_ptr to the end of its content; the unknown case has to
+        // do the same. Bytes already consumed in the prologue are 2
+        // for HEL-bearing (HET+HEL) and 1 for implicit-length (HET
+        // only); skip the remainder.
+        const size_t prologue_consumed = (het < 128) ? 2u : 1u;
+        const size_t skip_bytes = this_ext_bytes - prologue_consumed;
+        hdr_ptr  += skip_bytes;
+        consumed += skip_bytes;
+        spdlog::trace("Skipping unknown LCT extension (HET={}, len={})",
+                       het, this_ext_bytes);
+        break;
+      }
     }
 
     ext_header_len -= this_ext_bytes;
