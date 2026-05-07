@@ -10,19 +10,32 @@
 //
 // Scenarios:
 //   F = 10 MB / 100 MB / 500 MB,
-//   FEC = CompactNoCode (no overhead),
-//         R10     (RFC 5053, K_max = 8192,  ~15% surplus default),
-//         RaptorQ (RFC 6330, K_max = 56403, ~15% surplus default).
+//   FEC = CompactNoCode (lossless baseline, no FEC),
+//         R10     (RFC 5053, K_max = 8192,  5% surplus, 2 source drops),
+//         RaptorQ (RFC 6330, K_max = 56403, 5% surplus, 2 source drops).
 //   Both Raptor / RaptorQ scenarios are gated on RAPTOR_ENABLED.
+//
+// Why source-symbol drops rather than lossless: the decoder's lossless
+// short-circuit (every source ESI received → permute by ESI memcpy)
+// reduces "lossless Raptor decode" to a CompactNoCode-with-extra-emit-
+// overhead measurement — it never runs the matrix factor that's the
+// actual cost of the FEC. Dropping two source ESIs in block 0 forces
+// TryDecode through the matrix-factor / inactivation-decoder path
+// for that one block, while keeping the loss small enough to recover
+// inside any plausible repair budget. The 5 % surplus + 2-drop pattern
+// targets the realistic broadcast regime: low loss, FEC-driven recovery.
 //
 // Defaults can be overridden via env vars:
 //   FLUTE_BENCH_SIZES_MB="10,100"      // comma-separated
 //   FLUTE_BENCH_MTU=1500
 //   FLUTE_BENCH_SKIP_RAPTOR=1          // skip both R10 and RaptorQ scenarios
 //   FLUTE_BENCH_DROP_EVERY=20          // drop every Nth file packet
-//                                      // (TOI ≠ 0). Exercises Raptor's
-//                                      // repair path; CompactNoCode would
-//                                      // fail to reassemble. 0 = no drops.
+//                                      // (TOI ≠ 0). When set, the bench
+//                                      // also runs each Raptor / RaptorQ
+//                                      // scenario in this loss regime
+//                                      // (replacing the targeted-drop
+//                                      // pattern in that one row).
+//                                      // 0 = no extra sweep.
 //   FLUTE_BENCH_NO_DECODE=1            // make the encoder's PacketCallback
 //                                      // a no-op (skip decoder.feed_packet).
 //                                      // Isolates pure encoder wall-clock.
@@ -77,6 +90,8 @@ struct ScenarioResult {
     bool ok = false;
     int drop_every = 0;
     std::size_t dropped_count = 0;
+    std::size_t targeted_src_drops = 0;   // count of (sbn, esi) source-ESI drops
+    std::optional<unsigned> redundancy_level;
     LibFlute::EncoderStats es{};
     LibFlute::DecoderStats ds{};
 };
@@ -90,6 +105,41 @@ inline std::uint16_t ToiOf(std::span<const std::uint8_t> packet) {
         (static_cast<std::uint16_t>(packet[10]) << 8) | packet[11]);
 }
 
+// LCT codepoint at offset 3 (the 4th byte of the LCT base header).
+// Maps directly to the FEC encoding ID — 0 = CompactNoCode, 1 = R10,
+// 6 = RaptorQ — which is what we need to choose the FEC Payload ID
+// byte layout when peeking at SBN/ESI below.
+inline std::uint8_t CodepointOf(std::span<const std::uint8_t> packet) {
+    if (packet.size() < 4) return 0xFFU;
+    return packet[3];
+}
+
+// FEC Payload ID lives at offset 12 (LCT base 4 + CCI 4 + TSI half 2 +
+// TOI half 2). Layout depends on the codepoint: R10 / CompactNoCode
+// pack SBN(16) + ESI(16) per RFC 5052 §3.4.1; RaptorQ uses
+// SBN(8) + ESI(24) per RFC 6330 §3.2.
+struct PacketIds {
+    std::uint16_t toi = 0xFFFFU;
+    std::uint32_t sbn = 0;
+    std::uint32_t esi = 0;
+};
+inline PacketIds IdsOf(std::span<const std::uint8_t> packet) {
+    PacketIds ids;
+    if (packet.size() < 16) return ids;
+    ids.toi = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[10]) << 8) | packet[11]);
+    if (packet[3] == 6) {
+        ids.sbn = packet[12];
+        ids.esi = (static_cast<std::uint32_t>(packet[13]) << 16) |
+                   (static_cast<std::uint32_t>(packet[14]) <<  8) |
+                    static_cast<std::uint32_t>(packet[15]);
+    } else {
+        ids.sbn = (static_cast<std::uint32_t>(packet[12]) << 8) | packet[13];
+        ids.esi = (static_cast<std::uint32_t>(packet[14]) << 8) | packet[15];
+    }
+    return ids;
+}
+
 const char* FecName(LibFlute::FecScheme s) {
     switch (s) {
         case LibFlute::FecScheme::CompactNoCode: return "CompactNoCode";
@@ -99,16 +149,32 @@ const char* FecName(LibFlute::FecScheme s) {
     }
 }
 
-ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
-                              unsigned mtu, int drop_every = 0,
-                              bool no_decode = false) {
-    ScenarioResult r;
-    r.F   = F;
-    r.fec = fec;
-    r.drop_every = drop_every;
+struct ScenarioConfig {
+    std::size_t                F;
+    LibFlute::FecScheme        fec;
+    unsigned                   mtu;
+    // (SBN, ESI) pairs the harness deliberately drops on the wire.
+    // Used to force the receiver into the lossy-decode (matrix factor)
+    // path — pick ESIs in [0, K) so the loss hits *source* symbols and
+    // the lossless short-circuit (= every source ESI received → permute
+    // by ESI memcpy) never fires.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> targeted_drops;
+    // Per-file FEC redundancy override (Rel-11 attribute). nullopt =
+    // RaptorFEC default (15%).
+    std::optional<unsigned>    redundancy_level;
+    int                        drop_every = 0;
+    bool                       no_decode  = false;
+};
 
-    auto data = std::make_unique<char[]>(F);
-    FillDeterministic(data.get(), F);
+ScenarioResult RunScenario(const ScenarioConfig& cfg) {
+    ScenarioResult r;
+    r.F   = cfg.F;
+    r.fec = cfg.fec;
+    r.drop_every = cfg.drop_every;
+    r.redundancy_level = cfg.redundancy_level;
+
+    auto data = std::make_unique<char[]>(cfg.F);
+    FillDeterministic(data.get(), cfg.F);
 
     LibFlute::Decoder decoder(/*tsi=*/16);
     std::shared_ptr<LibFlute::File> received;
@@ -118,28 +184,39 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
     Clock::duration decode_time_acc{};
     std::size_t file_packet_idx = 0;
     std::size_t dropped = 0;
+    std::size_t targeted_dropped = 0;
 
     LibFlute::Encoder encoder(
-        /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
+        /*tsi=*/16, cfg.mtu, /*rate_limit_kbps=*/0,
         [&](std::span<const std::uint8_t> packet) -> bool {
-            // FLUTE_BENCH_NO_DECODE: short-circuit the lambda entirely.
-            // Used to isolate encoder pure wall-clock from any decoder-
-            // side timing. The receiver never sees the packets, so
-            // round-trip verification fails — that's expected; only
-            // the encoder column is meaningful in this mode.
-            if (no_decode) {
+            if (cfg.no_decode) {
                 return true;
             }
-            // Lossy path: drop every Nth file packet (TOI != 0).
-            // FDT packets always pass — without the FDT the
-            // receiver can't decode metadata. Loss is deterministic
-            // so wall-clock comparison stays meaningful.
-            if (drop_every > 0 && ToiOf(packet) != 0) {
-                ++file_packet_idx;
-                if (file_packet_idx %
-                        static_cast<std::size_t>(drop_every) == 0) {
-                    ++dropped;
-                    return true;
+            if (ToiOf(packet) != 0) {
+                // Targeted source-ESI drops: parse the FEC payload ID
+                // out of the packet (scheme-aware via codepoint) and
+                // drop if (sbn, esi) is in the configured set. Each
+                // matched drop counts once even if a packet bundles
+                // multiple symbols — the bundle-vs-single distinction
+                // is below the encoder's typical 1-symbol-per-packet
+                // emit cadence at mtu 1500 anyway.
+                if (!cfg.targeted_drops.empty()) {
+                    const auto ids = IdsOf(packet);
+                    for (const auto& [sbn, esi] : cfg.targeted_drops) {
+                        if (ids.sbn == sbn && ids.esi == esi) {
+                            ++targeted_dropped;
+                            ++dropped;
+                            return true;
+                        }
+                    }
+                }
+                if (cfg.drop_every > 0) {
+                    ++file_packet_idx;
+                    if (file_packet_idx %
+                            static_cast<std::size_t>(cfg.drop_every) == 0) {
+                        ++dropped;
+                        return true;
+                    }
                 }
             }
             const auto t0 = Clock::now();
@@ -148,13 +225,18 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
             return true;
         });
 
+    LibFlute::FileTransmissionConfig fec_cfg;
+    fec_cfg.oti.encoding_id     = cfg.fec;
+    fec_cfg.fec_redundancy_level = cfg.redundancy_level;
+
     const auto t_start = Clock::now();
     auto toi = encoder.send("bench.bin", "application/octet-stream",
                               LibFlute::Encoder::seconds_since_epoch() + 60,
-                              data.get(), F, fec, /*copy_buffer=*/false);
+                              data.get(), cfg.F, fec_cfg,
+                              /*copy_buffer=*/false);
     if (toi == 0) {
         std::fprintf(stderr, "encoder.send() failed for F=%zu fec=%s\n",
-                      F, FecName(fec));
+                      cfg.F, FecName(cfg.fec));
         return r;
     }
     encoder.flush();
@@ -164,12 +246,13 @@ ScenarioResult RunScenario(std::size_t F, LibFlute::FecScheme fec,
     r.decoder_time = decode_time_acc;
     r.es           = encoder.stats();
     r.ds           = decoder.stats();
-    r.dropped_count = dropped;
+    r.dropped_count      = dropped;
+    r.targeted_src_drops = targeted_dropped;
 
     r.ok = (received != nullptr) &&
            received->complete() &&
-           received->length() == F &&
-           std::memcmp(received->buffer(), data.get(), F) == 0;
+           received->length() == cfg.F &&
+           std::memcmp(received->buffer(), data.get(), cfg.F) == 0;
     return r;
 }
 
@@ -187,7 +270,10 @@ void PrintHeader(unsigned mtu) {
 
 void PrintRow(const ScenarioResult& r) {
     char loss_label[16] = "lossless";
-    if (r.drop_every > 0) {
+    if (r.targeted_src_drops > 0) {
+        std::snprintf(loss_label, sizeof(loss_label),
+                       "%zusrc-drop", r.targeted_src_drops);
+    } else if (r.drop_every > 0) {
         std::snprintf(loss_label, sizeof(loss_label),
                        "1in%d", r.drop_every);
     }
@@ -258,41 +344,55 @@ int main() {
         mtu = static_cast<unsigned>(std::strtoul(m, nullptr, 10));
     }
     const bool skip_raptor = std::getenv("FLUTE_BENCH_SKIP_RAPTOR") != nullptr;
-    // Lossy bench runs alongside the lossless one when this is set.
-    // The lossy column exercises the K+1 opportunistic-decode path
-    // because at least one source ESI per source block is dropped,
-    // so the lossless short-circuit (all source ESIs received) does
-    // not fire — instead Decoder::TryDecode runs the matrix factor.
     int drop_every = 0;
     if (const char* d = std::getenv("FLUTE_BENCH_DROP_EVERY"); d && *d) {
         drop_every = static_cast<int>(std::strtol(d, nullptr, 10));
     }
     const bool no_decode = std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr;
 
+    // Default Raptor / RaptorQ scenarios run with a low repair budget
+    // (5 % surplus) and deliberate source-symbol loss in block 0. This
+    // forces the receiver into the matrix-factor decode path — the
+    // lossless short-circuit (every source ESI received → permute by
+    // ESI memcpy) doesn't fire when source ESIs are missing, so the
+    // measurement reflects the actual cost of FEC recovery rather
+    // than CompactNoCode-with-extra-emit-overhead. The two drops sit
+    // in block 0 (always present, always source for our F sizes) so
+    // exactly one block per file pays the decode cost.
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>>
+        kSrcDrops{{0u, 5u}, {0u, 7u}};
+    constexpr unsigned kBenchRedundancyPercent = 5u;
+
     PrintHeader(mtu);
     for (auto F : ParseSizesEnv()) {
-        auto r = RunScenario(F, LibFlute::FecScheme::CompactNoCode, mtu,
-                              0, no_decode);
-        PrintRow(r);
+        ScenarioConfig cnc{};
+        cnc.F = F;
+        cnc.fec = LibFlute::FecScheme::CompactNoCode;
+        cnc.mtu = mtu;
+        cnc.no_decode = no_decode;
+        PrintRow(RunScenario(cnc));
+
 #ifdef RAPTOR_ENABLED
         if (!skip_raptor) {
-            // R10
-            auto rr = RunScenario(F, LibFlute::FecScheme::Raptor, mtu,
-                                  0, no_decode);
-            PrintRow(rr);
-            if (drop_every > 0) {
-                auto rl = RunScenario(F, LibFlute::FecScheme::Raptor,
-                                      mtu, drop_every, no_decode);
-                PrintRow(rl);
-            }
-            // RaptorQ
-            auto rq = RunScenario(F, LibFlute::FecScheme::RaptorQ, mtu,
-                                  0, no_decode);
-            PrintRow(rq);
-            if (drop_every > 0) {
-                auto rql = RunScenario(F, LibFlute::FecScheme::RaptorQ,
-                                        mtu, drop_every, no_decode);
-                PrintRow(rql);
+            for (auto fec : {LibFlute::FecScheme::Raptor,
+                              LibFlute::FecScheme::RaptorQ}) {
+                ScenarioConfig sc{};
+                sc.F                 = F;
+                sc.fec               = fec;
+                sc.mtu               = mtu;
+                sc.targeted_drops    = kSrcDrops;
+                sc.redundancy_level  = kBenchRedundancyPercent;
+                sc.no_decode         = no_decode;
+                PrintRow(RunScenario(sc));
+
+                // Optional per-Nth-packet drop sweep on top, when the
+                // user wants the lossy-budget regime instead of (or
+                // alongside) the targeted source-loss measurement.
+                if (drop_every > 0) {
+                    sc.targeted_drops.clear();
+                    sc.drop_every = drop_every;
+                    PrintRow(RunScenario(sc));
+                }
             }
         }
 #else
