@@ -296,7 +296,7 @@ TEST(RaptorWConfig, LargeWStillRoundTripsAtN1) {
         });
 
     LibFlute::FileTransmissionConfig cfg;
-    cfg.oti.encoding_id = LibFlute::FecScheme::Raptor;
+    cfg.scheme = LibFlute::FecScheme::Raptor;
     cfg.sub_block_size_target = 16ULL * 1024ULL * 1024ULL;  // 16 MB → N=1
 
     auto data_copy = data;
@@ -390,7 +390,7 @@ TEST_P(RaptorSubBlockLossy, SourceDropsAreRecoveredAtNGreaterThan1) {
         });
 
     LibFlute::FileTransmissionConfig cfg;
-    cfg.oti.encoding_id           = scheme;
+    cfg.scheme                    = scheme;
     cfg.sub_block_size_target     = W;
     cfg.fec_redundancy_level      = 5;  // budget for the 2 drops
 

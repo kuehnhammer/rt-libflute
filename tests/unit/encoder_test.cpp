@@ -70,18 +70,29 @@ TEST(EncoderSend, ImplicitFromFecSchemeStillCompilesAndQueues) {
   EXPECT_NE(toi, 0U);
 }
 
-// A populated FecOti passed via FileTransmissionConfig must reach the
-// FDT the encoder emits — that's the whole point of the new API.
-TEST(EncoderSend, PopulatedFecOtiReachesFdtXml) {
+// Helper: extract the FDT XML out of the captured packet stream. The
+// first emitted packet is always the FDT (TOI=0); rather than parse
+// the LCT/ALC headers we just locate the XML root inside the bytes.
+inline std::string ExtractFdtXml(const CapturingEncoder& cap) {
+  for (const auto& p : cap.packets()) {
+    std::string s(reinterpret_cast<const char*>(p.data()), p.size());
+    auto pos = s.find("<FDT-Instance");
+    if (pos != std::string::npos) {
+      return s.substr(pos);
+    }
+  }
+  return {};
+}
+
+// FEC-Redundancy-Level: TS 26.346 §7.3.2.11 / Rel-11 mbms2012
+// attribute. The caller-supplied percent must round-trip into the
+// FDT XML so the receiver can read it back.
+TEST(EncoderSend, FecRedundancyLevelRoundTripsToFdtXml) {
   CapturingEncoder cap;
 
   LibFlute::FileTransmissionConfig cfg;
-  cfg.oti.encoding_id                    = LibFlute::FecScheme::CompactNoCode;
-  cfg.oti.encoding_symbol_length         = 512;
-  cfg.oti.max_source_block_length        = 128;
-  cfg.oti.max_number_of_encoding_symbols = 147;
-  cfg.oti.instance_id                    = 0;  // CompactNoCode is fully-spec
-  cfg.fec_redundancy_level               = 15;
+  cfg.scheme               = LibFlute::FecScheme::CompactNoCode;
+  cfg.fec_redundancy_level = 15;
 
   std::string payload(2048, 'x');
   auto toi = cap.encoder().send(
@@ -89,52 +100,24 @@ TEST(EncoderSend, PopulatedFecOtiReachesFdtXml) {
       LibFlute::Encoder::seconds_since_epoch() + 60, payload.data(),
       payload.size(), cfg, /*copy_buffer=*/true);
   ASSERT_NE(toi, 0U);
-
   cap.encoder().flush();
-  ASSERT_FALSE(cap.packets().empty());
 
-  // Find the FDT XML the encoder emitted. The first packet is the FDT
-  // (TOI=0) — we don't bother parsing the LCT/ALC headers; we just
-  // hunt for the XML root in the byte stream.
-  std::string xml;
-  for (const auto& p : cap.packets()) {
-    std::string s(reinterpret_cast<const char*>(p.data()), p.size());
-    auto pos = s.find("<FDT-Instance");
-    if (pos != std::string::npos) {
-      xml = s.substr(pos);
-      break;
-    }
-  }
-  ASSERT_FALSE(xml.empty()) << "no FDT XML found in emitted packets";
-
-  // The per-file attributes should reflect the populated FecOti — at
-  // minimum, the symbol size, max-source-block-length, and
-  // max-number-of-encoding-symbols should appear next to the File
-  // entry, and the FEC-Redundancy-Level (Rel-11) should be carried.
-  EXPECT_NE(xml.find("FEC-OTI-Encoding-Symbol-Length=\"512\""),
-            std::string::npos)
-      << xml;
-  EXPECT_NE(xml.find("FEC-OTI-Maximum-Source-Block-Length=\"128\""),
-            std::string::npos)
-      << xml;
-  EXPECT_NE(xml.find("FEC-OTI-Max-Number-of-Encoding-Symbols=\"147\""),
-            std::string::npos)
-      << xml;
+  const auto xml = ExtractFdtXml(cap);
+  ASSERT_FALSE(xml.empty());
   EXPECT_NE(xml.find("FEC-Redundancy-Level=\"15\""), std::string::npos)
       << xml;
 }
 
-// FEC-OTI-FEC-Instance-ID: when the caller leaves it at 0 (the case
-// for every fully-specified scheme libflute emits), the FDT
-// serialiser MUST omit the attribute — TS 26.346 marks it as
-// optional and absent attribute = "no instance ID applies".
+// FEC-OTI-FEC-Instance-ID: TS 26.346 §7.3.2.8 instance-id. When the
+// caller leaves it at 0 (every fully-specified scheme libflute
+// emits), the FDT serialiser MUST omit the attribute — spec marks
+// it as optional and "absent ⇒ no instance ID applies".
 TEST(EncoderSend, InstanceIdZeroOmittedFromFdtXml) {
   CapturingEncoder cap;
 
   LibFlute::FileTransmissionConfig cfg;
-  cfg.oti.encoding_id            = LibFlute::FecScheme::CompactNoCode;
-  cfg.oti.encoding_symbol_length = 512;
-  cfg.oti.instance_id            = 0;
+  cfg.scheme          = LibFlute::FecScheme::CompactNoCode;
+  cfg.fec_instance_id = 0;
 
   std::string payload(1024, 'y');
   cap.encoder().send("y.bin", "application/octet-stream",
@@ -142,31 +125,21 @@ TEST(EncoderSend, InstanceIdZeroOmittedFromFdtXml) {
                      payload.data(), payload.size(), cfg,
                      /*copy_buffer=*/true);
   cap.encoder().flush();
-  ASSERT_FALSE(cap.packets().empty());
 
-  std::string xml;
-  for (const auto& p : cap.packets()) {
-    std::string s(reinterpret_cast<const char*>(p.data()), p.size());
-    auto pos = s.find("<FDT-Instance");
-    if (pos != std::string::npos) {
-      xml = s.substr(pos);
-      break;
-    }
-  }
+  const auto xml = ExtractFdtXml(cap);
   ASSERT_FALSE(xml.empty());
   EXPECT_EQ(xml.find("FEC-OTI-FEC-Instance-ID"), std::string::npos)
       << "Instance-ID=0 should not be serialised to the FDT:\n" << xml;
 }
 
-// FEC-OTI-FEC-Instance-ID: a non-zero value is round-tripped to the
-// FDT (forward-compatibility with under-specified schemes).
+// FEC-OTI-FEC-Instance-ID: non-zero round-trips to the FDT (forward
+// compatibility with under-specified FEC schemes).
 TEST(EncoderSend, NonZeroInstanceIdEmittedToFdtXml) {
   CapturingEncoder cap;
 
   LibFlute::FileTransmissionConfig cfg;
-  cfg.oti.encoding_id            = LibFlute::FecScheme::CompactNoCode;
-  cfg.oti.encoding_symbol_length = 512;
-  cfg.oti.instance_id            = 7;
+  cfg.scheme          = LibFlute::FecScheme::CompactNoCode;
+  cfg.fec_instance_id = 7;
 
   std::string payload(1024, 'z');
   cap.encoder().send("z.bin", "application/octet-stream",
@@ -174,17 +147,8 @@ TEST(EncoderSend, NonZeroInstanceIdEmittedToFdtXml) {
                      payload.data(), payload.size(), cfg,
                      /*copy_buffer=*/true);
   cap.encoder().flush();
-  ASSERT_FALSE(cap.packets().empty());
 
-  std::string xml;
-  for (const auto& p : cap.packets()) {
-    std::string s(reinterpret_cast<const char*>(p.data()), p.size());
-    auto pos = s.find("<FDT-Instance");
-    if (pos != std::string::npos) {
-      xml = s.substr(pos);
-      break;
-    }
-  }
+  const auto xml = ExtractFdtXml(cap);
   ASSERT_FALSE(xml.empty());
   EXPECT_NE(xml.find("FEC-OTI-FEC-Instance-ID=\"7\""), std::string::npos)
       << xml;
@@ -252,7 +216,7 @@ TEST(EncoderSend, RaptorRedundancyLevelDrivesRepairSymbolCount) {
   auto run_with_redundancy = [](unsigned percent) -> std::uint64_t {
     CapturingEncoder cap;
     LibFlute::FileTransmissionConfig cfg;
-    cfg.oti.encoding_id     = LibFlute::FecScheme::Raptor;
+    cfg.scheme               = LibFlute::FecScheme::Raptor;
     cfg.fec_redundancy_level = percent;
 
     // 200 kB file ⇒ Raptor partitions into a single block; the repair

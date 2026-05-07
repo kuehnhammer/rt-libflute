@@ -242,7 +242,7 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
         });
 
     LibFlute::FileTransmissionConfig fec_cfg;
-    fec_cfg.oti.encoding_id        = cfg.fec;
+    fec_cfg.scheme                 = cfg.fec;
     fec_cfg.fec_redundancy_level   = cfg.redundancy_level;
     fec_cfg.sub_block_size_target  = cfg.sub_block_size_target;
 

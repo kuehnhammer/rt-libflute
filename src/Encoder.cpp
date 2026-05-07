@@ -168,29 +168,16 @@ std::uint16_t Encoder::send(std::string content_location,
     _next_toi = 1;
   }
 
-  // Merge per-file FecOti over the encoder's FDT-Instance defaults.
-  // Caller-supplied non-sentinel values win; sentinel (0 / empty)
-  // inherits from `_fec_oti`. Mirrors MBMS reader semantics where an
-  // absent per-file FEC-OTI-* attribute falls back to the FDT-Instance
-  // default attribute on the root.
+  // The caller supplies only what TS 26.346 SDP exposes (§7.3.2.8 +
+  // §7.3.2.11): scheme + instance-id + redundancy-level. Everything
+  // else in the FEC OTI (T, K, Z, N, Al, max-encoding-symbols) is
+  // libflute's job — derived by the FEC transformer from F, mtu, and
+  // the partitioner's algorithm, then written into the FDT for the
+  // receiver. The encoder's `_fec_oti` provides the FDT-Instance
+  // defaults for non-FEC fields (T from MTU, etc.).
   FecOti file_oti = _fec_oti;
-  file_oti.encoding_id = fec_config.oti.encoding_id;
-  if (fec_config.oti.encoding_symbol_length != 0) {
-    file_oti.encoding_symbol_length = fec_config.oti.encoding_symbol_length;
-  }
-  if (fec_config.oti.max_source_block_length != 0) {
-    file_oti.max_source_block_length = fec_config.oti.max_source_block_length;
-  }
-  if (fec_config.oti.max_number_of_encoding_symbols != 0) {
-    file_oti.max_number_of_encoding_symbols =
-        fec_config.oti.max_number_of_encoding_symbols;
-  }
-  if (fec_config.oti.instance_id != 0) {
-    file_oti.instance_id = fec_config.oti.instance_id;
-  }
-  if (!fec_config.oti.scheme_specific_info.empty()) {
-    file_oti.scheme_specific_info = fec_config.oti.scheme_specific_info;
-  }
+  file_oti.encoding_id = fec_config.scheme;
+  file_oti.instance_id = fec_config.fec_instance_id;
 
   std::shared_ptr<File> file;
   try {

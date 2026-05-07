@@ -127,8 +127,13 @@ class Encoder {
    */
   // The `fec_config` arg accepts either a bare `FecScheme` (existing
   // call sites compile unchanged via FileTransmissionConfig's implicit
-  // ctor) or a populated `FileTransmissionConfig` for full TS 26.346
-  // §7.2.10.1 control over the per-file FEC OTI.
+  // ctor) or a populated `FileTransmissionConfig` exposing the
+  // caller-side knobs TS 26.346 actually defines for FLUTE: SDP
+  // §7.3.2.8 (scheme + instance-id) and §7.3.2.11 (redundancy-level
+  // percent), plus the §B.3.4.1 / RFC 6330 §4.3 sub-block size
+  // target as a deployment knob. T, K, Z, N, Al, max-encoding-symbols
+  // are libflute's job — derived by the partitioner from F, mtu and
+  // the chosen scheme, then written into the FDT for the receiver.
   std::uint16_t send(std::string content_location,
                       std::string content_type,
                       std::uint64_t expires_ntp_seconds,

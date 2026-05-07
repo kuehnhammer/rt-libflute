@@ -127,42 +127,52 @@ namespace LibFlute {
   };
 
   // Per-file transmission config the caller hands to Encoder::send().
-  // Bundles the FEC-OTI-* fields (TS 26.346 §7.2.10.1) with the Rel-11
-  // FEC-Redundancy-Level attribute that lives next to FEC OTI in the
-  // FDT but is not itself part of FEC OTI. Implicitly constructible
-  // from FecScheme so call sites that only need to pick a scheme can
-  // still write `encoder.send(..., FecScheme::Raptor)` unchanged.
+  // Mirrors the SDP FEC parametrisation surface TS 26.346 actually
+  // exposes for download delivery: §7.3.2.8 (Encoding-ID + optional
+  // Instance-ID via `a=FEC-declaration:`) and §7.3.2.11 (per-file
+  // `a=FEC-redundancy-level:` percent). The remaining FEC OTI fields
+  // (T, K, Z, N, Al, max-encoding-symbols) are libflute's job — they
+  // flow into the FDT XML at runtime per the partitioner, and the
+  // caller has no way to express them in xMB/SDP anyway.
   //
-  // Caller-supplied fields override the encoder's FDT-Instance defaults
-  // on a per-file basis (matching MBMS reader semantics for absent
-  // attributes). Sentinel values (0 / empty / nullopt) mean "inherit
-  // from the FDT-Instance default, then let the FEC transformer fill
-  // in what's still missing".
+  // `sub_block_size_target` is the only field with no SDP backing —
+  // it's a deployment-time knob (TS 26.346 §B.3.4.1 normative 256 KB
+  // for R10, deployment-tuned for RaptorQ per RFC 6330 §4.3) — and
+  // sits here because it's a per-file partitioner input.
+  //
+  // Implicitly constructible from FecScheme so call sites that only
+  // need to pick a scheme can still write
+  // `encoder.send(..., FecScheme::Raptor)` unchanged.
   struct FileTransmissionConfig {
-    FecOti oti{};
-    // FEC-Redundancy-Level (Rel-11 mbms2012 attribute, xs:unsignedInt).
-    // Per-file repair overhead expressed as an integer percent: 15 ⇒
-    // K * 1.15 total symbols on the wire. nullopt ⇒ scheme default
-    // (Raptor / RaptorQ pick their own; CompactNoCode ignores).
+    // SDP §7.3.2.8 Encoding-ID. Maps to the wire-level FEC scheme;
+    // identical to the value emitted in the FDT FEC-OTI-FEC-Encoding-ID
+    // attribute.
+    FecScheme scheme = FecScheme::CompactNoCode;
+
+    // SDP §7.3.2.8 instance-id. Only meaningful for under-specified
+    // FEC schemes (RFC 5052 §4); fully-specified schemes
+    // (CompactNoCode, R10, RaptorQ, RS GF(2^8)) leave this at 0.
+    std::uint8_t fec_instance_id = 0;
+
+    // SDP §7.3.2.11 redundancy-level. Per-file repair overhead as an
+    // integer percent: 15 ⇒ K * 1.15 total symbols on the wire.
+    // nullopt ⇒ scheme default. Round-trips into the FDT's Rel-11
+    // mbms2012:FEC-Redundancy-Level attribute.
     std::optional<unsigned> fec_redundancy_level;
-    // Sub-block size target W (RFC 5053 §4.2 / RFC 6330 §4.3 input).
-    // Drives the autodetect for N (the number of sub-blocks per source
-    // block). Sentinel 0 ⇒ use the scheme-internal default (currently
-    // 16 MB across schemes — keeps N=1 and backward-compatible until
-    // the codec ships sub-block interleaving). For TS 26.346-conformant
-    // R10 file delivery the spec-mandated value is 256 KB (§B.3.4.1);
-    // RaptorQ leaves it as a deployment knob (RFC 6330 §4.3).
-    // Caller-driven so xMB / SDP-supplied derivation inputs reach
-    // RaptorFEC's partitioning verbatim.
+
+    // RFC 5053 §4.2 W / RFC 6330 §4.3 WS. Sub-block / working-memory
+    // size target. Sentinel 0 ⇒ use the scheme default (16 MB).
+    // TS 26.346 §B.3.4.1 mandates 256 KB for R10 file delivery;
+    // RaptorQ leaves it as a deployment knob. Not on the SDP wire —
+    // the integrator picks this per their build/deployment config.
     std::uint64_t sub_block_size_target = 0;
 
     FileTransmissionConfig() = default;
 
     // NOLINTNEXTLINE(google-explicit-constructor) — implicit conversion
-    // from FecScheme is the migration path for existing call sites.
-    FileTransmissionConfig(FecScheme scheme) {
-      oti.encoding_id = scheme;
-    }
+    // from FecScheme keeps existing `encoder.send(..., FecScheme::X)`
+    // call sites compiling.
+    FileTransmissionConfig(FecScheme s) : scheme(s) {}
   };
 
 
