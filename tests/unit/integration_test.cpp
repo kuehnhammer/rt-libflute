@@ -313,15 +313,52 @@ TEST(RaptorWConfig, LargeWStillRoundTripsAtN1) {
     EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0);
 }
 
+// Parse the LCT codepoint and FEC Payload ID out of a wire packet so
+// the test can target individual source ESIs for deliberate loss.
+// Layout per RFC 5052 §3.4.1 / RFC 5053 §3.2 (R10) and RFC 6330 §3.2
+// (RaptorQ): codepoint at byte 3, TOI at bytes 10..11, FEC Payload ID
+// at bytes 12..15 — SBN(16)+ESI(16) for R10/CompactNoCode, SBN(8)+
+// ESI(24) for RaptorQ.
+struct WirePacketIds {
+    std::uint16_t toi = 0xFFFFU;
+    std::uint32_t sbn = 0;
+    std::uint32_t esi = 0;
+};
+inline WirePacketIds ParseIds(std::span<const std::uint8_t> p) {
+    WirePacketIds ids;
+    if (p.size() < 16) return ids;
+    ids.toi = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(p[10]) << 8) | p[11]);
+    if (p[3] == 6) {
+        ids.sbn = p[12];
+        ids.esi = (static_cast<std::uint32_t>(p[13]) << 16) |
+                   (static_cast<std::uint32_t>(p[14]) <<  8) |
+                    static_cast<std::uint32_t>(p[15]);
+    } else {
+        ids.sbn = (static_cast<std::uint32_t>(p[12]) << 8) | p[13];
+        ids.esi = (static_cast<std::uint32_t>(p[14]) << 8) | p[15];
+    }
+    return ids;
+}
+
 // Small W (TS 26.346 §B.3.4.1's normative 256 KB for R10 file
 // delivery) makes the autodetect formula pick N>1 for blocks larger
-// than W. The codec must accept the resulting (K, T, Al, N) and
-// re-lay-out the K·T contiguous source bytes as N sub-blocks
-// internally; both encoder and decoder agree on N via the FEC OTI's
-// scheme-specific info, so the round-trip is byte-identical.
-TEST(RaptorWConfig, SmallWForcesNGreaterThan1) {
-    constexpr std::size_t F = 1u << 20;  // 1 MiB
-    constexpr unsigned    mtu = 1500;
+// than W. THIS test must hit the matrix-decode path at N>1 — a
+// lossless round-trip is meaningless because the receiver's lossless
+// short-circuit (every source ESI received → memcpy by ESI) fires
+// before any codec work runs, so the test would pass even if the
+// codec's N>1 decode path is broken.
+//
+// Force the lossy path by deliberately dropping two source ESIs.
+// 5% repair surplus easily covers two drops, so successful recovery
+// proves both the encoder's N>1 sub-block path AND the decoder's
+// N>1 inactivation-decode path produce byte-correct output.
+class RaptorSubBlockLossy
+    : public ::testing::TestWithParam<
+          std::tuple<LibFlute::FecScheme, std::size_t, unsigned, std::uint64_t>> {};
+
+TEST_P(RaptorSubBlockLossy, SourceDropsAreRecoveredAtNGreaterThan1) {
+    const auto [scheme, F, mtu, W] = GetParam();
     const auto data = MakeBuffer(F);
 
     LibFlute::Decoder decoder(/*tsi=*/16);
@@ -329,30 +366,81 @@ TEST(RaptorWConfig, SmallWForcesNGreaterThan1) {
     decoder.register_completion_callback(
         [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });
 
+    // Drop two specific source ESIs in block 0 — the partitioning
+    // always puts at least KS source symbols there, and KS is in the
+    // thousands for our F sizes, so ESI 5 and 7 are guaranteed source.
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> drops{
+        {0u, 5u}, {0u, 7u}};
+    std::size_t dropped = 0;
+
     LibFlute::Encoder encoder(
         /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
-        [&](std::span<const std::uint8_t> p) {
+        [&](std::span<const std::uint8_t> p) -> bool {
+            const auto ids = ParseIds(p);
+            if (ids.toi != 0) {
+                for (const auto& [sbn, esi] : drops) {
+                    if (ids.sbn == sbn && ids.esi == esi) {
+                        ++dropped;
+                        return true;  // simulate wire loss
+                    }
+                }
+            }
             decoder.feed_packet(p);
             return true;
         });
 
     LibFlute::FileTransmissionConfig cfg;
-    cfg.oti.encoding_id = LibFlute::FecScheme::Raptor;
-    cfg.sub_block_size_target = 256ULL * 1024ULL;  // TS 26.346 §B.3.4.1 R10
+    cfg.oti.encoding_id           = scheme;
+    cfg.sub_block_size_target     = W;
+    cfg.fec_redundancy_level      = 5;  // budget for the 2 drops
 
     auto data_copy = data;
-    auto toi = encoder.send("w-test.bin", "application/octet-stream",
+    auto toi = encoder.send("subblock-lossy.bin", "application/octet-stream",
                               LibFlute::Encoder::seconds_since_epoch() + 60,
                               data_copy.data(), data_copy.size(), cfg,
                               /*copy_buffer=*/false);
     ASSERT_NE(toi, 0U);
     encoder.flush();
 
-    ASSERT_NE(received, nullptr);
+    EXPECT_EQ(dropped, drops.size())
+        << "loss harness didn't fire on the targeted source ESIs — "
+           "test is passing trivially without exercising the matrix "
+           "decode path";
+    ASSERT_NE(received, nullptr)
+        << "decoder failed to reconstruct after dropping " << dropped
+        << " source ESIs at W=" << W;
     EXPECT_TRUE(received->complete());
     ASSERT_EQ(received->length(), F);
-    EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0);
+    EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0)
+        << "reconstructed bytes differ from sent at scheme="
+        << static_cast<int>(scheme) << " F=" << F << " W=" << W;
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Sizes, RaptorSubBlockLossy,
+    ::testing::Values(
+        // (scheme, F, mtu, W) — W=256 KB matches TS 26.346 §B.3.4.1
+        // for R10 file delivery and forces N>1 once K·T exceeds 256 KB.
+        // F must be ≥ ~1.5 MiB at mtu=1500 so the autodetect picks
+        // T=1456 (= mtu - 44, one symbol per packet); below that the
+        // formula picks T=728 with 2 symbols/packet bundled, and the
+        // FEC Payload ID then reports the FIRST symbol's ESI in
+        // steps of 2 — ESI 5/7 vanish into bundled packets reported
+        // as ESI 4/6, defeating the targeted drops. F=4 MiB stays
+        // safely above the threshold.
+        std::make_tuple(LibFlute::FecScheme::Raptor,  4u << 20, 1500U,
+                         256ULL * 1024ULL),
+        std::make_tuple(LibFlute::FecScheme::RaptorQ, 4u << 20, 1500U,
+                         256ULL * 1024ULL)
+        ),
+    [](const ::testing::TestParamInfo<RaptorSubBlockLossy::ParamType>& info) {
+        const char* name =
+            (std::get<0>(info.param) == LibFlute::FecScheme::Raptor)
+                ? "R10" : "RaptorQ";
+        return std::string(name) + "_F" +
+               std::to_string(std::get<1>(info.param)) + "_W" +
+               std::to_string(std::get<3>(info.param));
+    });
 
 // RaptorQ (RFC 6330) round-trip. Wire-format is symmetric with R10
 // at the libflute layer (LCT codepoint 6, FEC Payload ID = SBN(8) +
