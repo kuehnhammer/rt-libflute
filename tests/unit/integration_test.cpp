@@ -315,12 +315,11 @@ TEST(RaptorWConfig, LargeWStillRoundTripsAtN1) {
 
 // Small W (TS 26.346 §B.3.4.1's normative 256 KB for R10 file
 // delivery) makes the autodetect formula pick N>1 for blocks larger
-// than W — which today causes bitstem-fec's Encoder::Create to
-// return nullopt because sub-block interleaving isn't implemented
-// yet. The test is **disabled** until the codec ships N>1; once it
-// does, drop the DISABLED_ prefix and this becomes the regression
-// guard for sub-block correctness.
-TEST(RaptorWConfig, DISABLED_SmallWForcesNGreaterThan1) {
+// than W. The codec must accept the resulting (K, T, Al, N) and
+// re-lay-out the K·T contiguous source bytes as N sub-blocks
+// internally; both encoder and decoder agree on N via the FEC OTI's
+// scheme-specific info, so the round-trip is byte-identical.
+TEST(RaptorWConfig, SmallWForcesNGreaterThan1) {
     constexpr std::size_t F = 1u << 20;  // 1 MiB
     constexpr unsigned    mtu = 1500;
     const auto data = MakeBuffer(F);

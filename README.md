@@ -165,6 +165,27 @@ real bug they surfaced. The fixed-bug ledger is in
 - TX-side Raptor source-block padding + `FEC-OTI-Scheme-Specific-Info`
   serialisation per RFC 5053 §3.2.
 
+## TS 26.346 conformance (R10 file delivery)
+
+The TS 26.346 §B.3.4.1 derivation algorithm is normative for MBMS file
+delivery senders. libflute matches each input parameter:
+
+| Param | TS 26.346 | libflute |
+|-------|-----------|----------|
+| Al    | 4         | 4 (`RaptorFEC.h`) |
+| KMIN  | 1024      | 1024 (`G = ceil(P·1024/F)` literal in `calculate_partitioning`) |
+| GMAX  | 10        | 10 (the `fmin(..., 10.0f)` cap) |
+| W     | 256 KB    | caller-supplied via `FileTransmissionConfig::sub_block_size_target`; default 16 MB |
+| Kmax  | 8192      | 8192 |
+
+The G/T/Z/N derivation formula matches RFC 5053 §4.2 byte-for-byte and
+the per-block split agrees with TS 26.346 Table B.3.4.2-1's worked
+examples. For full TS 26.346-conformant emission, the xMB / SDP-side
+caller sets `sub_block_size_target = 256 KB` per file (as the bench
+does by default — see `tests/bench/flute_bench.cpp`). RaptorQ is
+out-of-scope for TS 26.346 and uses the same W default; RFC 6330 §4.3
+leaves WS as a deployment knob.
+
 ## Documentation
 
 `tests/COVERAGE.md` — what the test suite proves, organised by

@@ -25,9 +25,20 @@
 // inside any plausible repair budget. The 5 % surplus + 2-drop pattern
 // targets the realistic broadcast regime: low loss, FEC-driven recovery.
 //
+// W (sub-block size target) defaults to TS 26.346 §B.3.4.1's normative
+// 256 KB for R10 file delivery; the same value is used for RaptorQ
+// (RFC 6330 §4.3 leaves WS as a deployment knob, no normative pin).
+// At W=256 KB the autodetect picks N>1 for multi-MB blocks, so the
+// codec's sub-block-interleaved path is what gets measured. Override
+// with FLUTE_BENCH_W_BYTES=N for legacy comparison runs at N=1.
+//
 // Defaults can be overridden via env vars:
 //   FLUTE_BENCH_SIZES_MB="10,100"      // comma-separated
 //   FLUTE_BENCH_MTU=1500
+//   FLUTE_BENCH_W_BYTES=262144         // sub-block size target (R10
+//                                      // TS 26.346 normative). Bump to
+//                                      // 16777216 to reproduce the
+//                                      // pre-N>1 N=1 regime.
 //   FLUTE_BENCH_SKIP_RAPTOR=1          // skip both R10 and RaptorQ scenarios
 //   FLUTE_BENCH_DROP_EVERY=20          // drop every Nth file packet
 //                                      // (TOI ≠ 0). When set, the bench
@@ -92,6 +103,7 @@ struct ScenarioResult {
     std::size_t dropped_count = 0;
     std::size_t targeted_src_drops = 0;   // count of (sbn, esi) source-ESI drops
     std::optional<unsigned> redundancy_level;
+    std::uint64_t sub_block_size_target = 0;
     LibFlute::EncoderStats es{};
     LibFlute::DecoderStats ds{};
 };
@@ -162,6 +174,10 @@ struct ScenarioConfig {
     // Per-file FEC redundancy override (Rel-11 attribute). nullopt =
     // RaptorFEC default (15%).
     std::optional<unsigned>    redundancy_level;
+    // Sub-block size target (RFC 5053 §4.2 / RFC 6330 §4.3 W). Drives
+    // the autodetect for N (sub-blocks per source block). 0 = use
+    // RaptorFEC's internal default (16 MB → biased toward N=1).
+    std::uint64_t              sub_block_size_target = 0;
     int                        drop_every = 0;
     bool                       no_decode  = false;
 };
@@ -226,8 +242,9 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
         });
 
     LibFlute::FileTransmissionConfig fec_cfg;
-    fec_cfg.oti.encoding_id     = cfg.fec;
-    fec_cfg.fec_redundancy_level = cfg.redundancy_level;
+    fec_cfg.oti.encoding_id        = cfg.fec;
+    fec_cfg.fec_redundancy_level   = cfg.redundancy_level;
+    fec_cfg.sub_block_size_target  = cfg.sub_block_size_target;
 
     const auto t_start = Clock::now();
     auto toi = encoder.send("bench.bin", "application/octet-stream",
@@ -246,8 +263,9 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
     r.decoder_time = decode_time_acc;
     r.es           = encoder.stats();
     r.ds           = decoder.stats();
-    r.dropped_count      = dropped;
-    r.targeted_src_drops = targeted_dropped;
+    r.dropped_count         = dropped;
+    r.targeted_src_drops    = targeted_dropped;
+    r.sub_block_size_target = cfg.sub_block_size_target;
 
     r.ok = (received != nullptr) &&
            received->complete() &&
@@ -258,18 +276,30 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
 
 void PrintHeader(unsigned mtu) {
     std::printf("== libflute round-trip benchmark (mtu=%u) ==\n\n", mtu);
-    std::printf("%-7s  %-13s  %-9s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
-                "F (MB)", "FEC", "loss",
+    std::printf("%-7s  %-13s  %-9s  %-7s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+                "F (MB)", "FEC", "loss", "W",
                 "packets", "src syms", "rep syms",
                 "enc (ms)", "dec (ms)", "throughput", "overhead");
-    std::printf("%-7s  %-13s  %-9s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
-                "-------", "-------------", "---------",
+    std::printf("%-7s  %-13s  %-9s  %-7s  %12s  %12s  %12s  %10s  %10s  %14s  %s\n",
+                "-------", "-------------", "---------", "-------",
                 "------------", "------------", "------------",
                 "----------", "----------", "--------------", "--------");
 }
 
+// Format W as a short human-readable suffix (e.g. "256K", "16M").
+// Returns "default" for sentinel 0 — the bench uses 0 to mean
+// "let RaptorFEC pick" on schemes where W doesn't apply (e.g.
+// CompactNoCode rows).
+std::string WLabel(std::uint64_t w) {
+    if (w == 0)               return "default";
+    if (w >= 1ULL << 30)      return std::to_string(w >> 30) + "G";
+    if (w >= 1ULL << 20)      return std::to_string(w >> 20) + "M";
+    if (w >= 1ULL << 10)      return std::to_string(w >> 10) + "K";
+    return std::to_string(w);
+}
+
 void PrintRow(const ScenarioResult& r) {
-    char loss_label[16] = "lossless";
+    char loss_label[24] = "lossless";
     if (r.targeted_src_drops > 0) {
         std::snprintf(loss_label, sizeof(loss_label),
                        "%zusrc-drop", r.targeted_src_drops);
@@ -284,16 +314,19 @@ void PrintRow(const ScenarioResult& r) {
         if (std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr) {
             const double mb_nd = static_cast<double>(r.F) /
                                  (1024.0 * 1024.0);
-            std::printf("%-7.0f  %-13s  %-9s  enc=%.1f ms  "
+            std::printf("%-7.0f  %-13s  %-9s  %-7s  enc=%.1f ms  "
                         "dec=%.1f ms  (no-decode mode)\n",
                         mb_nd, FecName(r.fec), loss_label,
+                        WLabel(r.sub_block_size_target).c_str(),
                         DurationMs(r.encoder_time),
                         DurationMs(r.decoder_time));
             return;
         }
-        std::printf("%-7.0f  %-13s  %-9s  ROUND-TRIP FAILED (%zu drops)\n",
+        std::printf("%-7.0f  %-13s  %-9s  %-7s  ROUND-TRIP FAILED (%zu drops)\n",
                     static_cast<double>(r.F) / (1024.0 * 1024.0),
-                    FecName(r.fec), loss_label, r.dropped_count);
+                    FecName(r.fec), loss_label,
+                    WLabel(r.sub_block_size_target).c_str(),
+                    r.dropped_count);
         return;
     }
     const double mb = static_cast<double>(r.F) / (1024.0 * 1024.0);
@@ -305,8 +338,9 @@ void PrintRow(const ScenarioResult& r) {
             ? 100.0 * static_cast<double>(r.es.repair_symbols_emitted) /
                   static_cast<double>(r.es.source_symbols_emitted)
             : 0.0;
-    std::printf("%-7.0f  %-13s  %-9s  %12llu  %12llu  %12llu  %10.1f  %10.1f  %11.1f MB/s  %6.1f%% (%6.2f MB)\n",
+    std::printf("%-7.0f  %-13s  %-9s  %-7s  %12llu  %12llu  %12llu  %10.1f  %10.1f  %11.1f MB/s  %6.1f%% (%6.2f MB)\n",
                 mb, FecName(r.fec), loss_label,
+                WLabel(r.sub_block_size_target).c_str(),
                 static_cast<unsigned long long>(r.es.packets_emitted),
                 static_cast<unsigned long long>(r.es.source_symbols_emitted),
                 static_cast<unsigned long long>(r.es.repair_symbols_emitted),
@@ -350,6 +384,18 @@ int main() {
     }
     const bool no_decode = std::getenv("FLUTE_BENCH_NO_DECODE") != nullptr;
 
+    // Sub-block size target W (RFC 5053 §4.2 / RFC 6330 §4.3 input).
+    // TS 26.346 §B.3.4.1 mandates W=256 KB for R10 file delivery and
+    // doesn't pin RaptorQ; we use 256 KB as the bench default for both
+    // schemes so the autodetect picks N>1 on multi-MB blocks and the
+    // codec's sub-block-interleaved path is what we measure. Override
+    // with FLUTE_BENCH_W_BYTES=N (in bytes) — useful for sweep
+    // comparisons against the legacy 16 MB N=1 regime.
+    std::uint64_t bench_w = 256ULL * 1024ULL;
+    if (const char* w = std::getenv("FLUTE_BENCH_W_BYTES"); w && *w) {
+        bench_w = std::strtoull(w, nullptr, 10);
+    }
+
     // Default Raptor / RaptorQ scenarios run with a low repair budget
     // (5 % surplus) and deliberate source-symbol loss in block 0. This
     // forces the receiver into the matrix-factor decode path — the
@@ -377,12 +423,13 @@ int main() {
             for (auto fec : {LibFlute::FecScheme::Raptor,
                               LibFlute::FecScheme::RaptorQ}) {
                 ScenarioConfig sc{};
-                sc.F                 = F;
-                sc.fec               = fec;
-                sc.mtu               = mtu;
-                sc.targeted_drops    = kSrcDrops;
-                sc.redundancy_level  = kBenchRedundancyPercent;
-                sc.no_decode         = no_decode;
+                sc.F                     = F;
+                sc.fec                   = fec;
+                sc.mtu                   = mtu;
+                sc.targeted_drops        = kSrcDrops;
+                sc.redundancy_level      = kBenchRedundancyPercent;
+                sc.sub_block_size_target = bench_w;
+                sc.no_decode             = no_decode;
                 PrintRow(RunScenario(sc));
 
                 // Optional per-Nth-packet drop sweep on top, when the
@@ -398,6 +445,7 @@ int main() {
 #else
         (void)skip_raptor;
         (void)drop_every;
+        (void)bench_w;
 #endif
         std::fflush(stdout);
     }
