@@ -328,6 +328,14 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
         return r;
     }
     encoder.flush();
+    // End-of-transmission decode trigger. The empty-FDT skip
+    // (Encoder defends against MBMS-middleware crashes on
+    // zero-file FDTs) means the receiver doesn't see an FDT diff
+    // and so the abandoned-TOI auto-trigger inside feed_packet
+    // doesn't fire. Account the explicit flush as decoder wall.
+    const auto t_dec_flush = Clock::now();
+    decoder.flush_pending_decodes();
+    decode_time_acc += Clock::now() - t_dec_flush;
     const auto t_end = Clock::now();
     r.total_time   = t_end - t_start;
     r.encoder_time = r.total_time - decode_time_acc;

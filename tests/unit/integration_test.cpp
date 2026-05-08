@@ -116,6 +116,15 @@ RoundTripResult RoundTrip(const std::vector<char>& data,
     // No rate limiting → flush() drains everything.
     encoder.flush();
 
+    // End-of-transmission trigger. The encoder's empty-FDT skip
+    // (defence against commercial-MBMS-middleware crashes) means
+    // the receiver doesn't see an FDT diff with the TOI removed
+    // when the sender finishes; without that, the abandoned-TOI
+    // path inside Decoder::feed_packet never fires
+    // try_decode_pending. Call the explicit flush so lossy files
+    // get their matrix-solve.
+    decoder.flush_pending_decodes();
+
     return result;
 }
 
@@ -306,6 +315,7 @@ TEST(RaptorWConfig, LargeWStillRoundTripsAtN1) {
                               /*copy_buffer=*/false);
     ASSERT_NE(toi, 0U);
     encoder.flush();
+    decoder.flush_pending_decodes();
 
     ASSERT_NE(received, nullptr);
     EXPECT_TRUE(received->complete());
@@ -401,6 +411,7 @@ TEST_P(RaptorSubBlockLossy, SourceDropsAreRecoveredAtNGreaterThan1) {
                               /*copy_buffer=*/false);
     ASSERT_NE(toi, 0U);
     encoder.flush();
+    decoder.flush_pending_decodes();
 
     EXPECT_EQ(dropped, drops.size())
         << "loss harness didn't fire on the targeted source ESIs — "
@@ -497,6 +508,7 @@ TEST_P(RaptorParallelDecode, ParallelDecodeAcrossSbns) {
                               /*copy_buffer=*/false);
     ASSERT_NE(toi, 0U);
     encoder.flush();
+    decoder.flush_pending_decodes();
 
     EXPECT_GT(dropped, 0U) << "loss harness didn't fire — test isn't "
                               "exercising the matrix-solve / parallel-decode path";

@@ -35,6 +35,53 @@ Decoder::Decoder(std::uint64_t tsi, unsigned fec_dec_worker_threads)
     : _tsi(tsi)
     , _fec_dec_worker_threads(fec_dec_worker_threads) {}
 
+std::size_t Decoder::flush_pending_decodes() {
+  // Snapshot the (toi, file) pairs under the lock, then drop the
+  // lock for each file's try_decode_pending — the FEC matrix-solve
+  // can be hundreds of ms and we don't want to hold _files_mutex
+  // across that (feed_packet on another thread should still be able
+  // to land late repair symbols, in principle).
+  std::vector<std::pair<std::uint32_t, std::shared_ptr<File>>> snapshot;
+  {
+    const std::lock_guard<std::mutex> lock(_files_mutex);
+    snapshot.reserve(_files.size());
+    for (auto& [toi, file] : _files) {
+      if (file && !file->complete() && toi != 0) {
+        snapshot.emplace_back(toi, file);
+      }
+    }
+  }
+
+  std::size_t completed = 0;
+  for (auto& [toi, file] : snapshot) {
+    file->try_decode_pending();
+    if (!file->complete()) {
+      continue;
+    }
+    ++completed;
+    spdlog::debug("flush_pending_decodes: TOI {} completed", toi);
+
+    // Fire the completion callback under the same protocol the FDT
+    // path uses (snapshot under lock, dispatch outside).
+    CompletionCallback cb_snapshot;
+    std::shared_ptr<File> cb_file;
+    {
+      const std::lock_guard<std::mutex> lock(_files_mutex);
+      auto fit = _files.find(toi);
+      if (fit != _files.end() && _completion_cb) {
+        cb_file     = fit->second;
+        cb_snapshot = _completion_cb;
+        _files.erase(fit);
+      }
+    }
+    if (cb_snapshot && cb_file) {
+      _stats.files_completed.fetch_add(1, std::memory_order_relaxed);
+      cb_snapshot(cb_file);
+    }
+  }
+  return completed;
+}
+
 void Decoder::register_completion_callback(CompletionCallback cb) {
   const std::lock_guard<std::mutex> lock(_files_mutex);
   _completion_cb = std::move(cb);

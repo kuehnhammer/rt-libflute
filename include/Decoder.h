@@ -152,6 +152,27 @@ class Decoder {
   /// returned value is decoupled from internal state.
   DecoderStats stats() const;
 
+  /// Force an end-of-transmission decode pass on every in-flight
+  /// File. Each File's FEC transformer (Raptor / RaptorQ) runs
+  /// try_decode_pending() on its accumulated receive state — the
+  /// matrix-solve path that recovers files with ≥1 lost source
+  /// symbol. Files that already auto-finalised (lossless reception)
+  /// are skipped; a single call drains every recoverable pending
+  /// file. Completion callbacks fire for files that decode
+  /// successfully.
+  ///
+  /// Use case: the carousel-driven sender has stopped emitting
+  /// FDTs (file enqueue / completion are the only triggers
+  /// libflute uses for FDT emit, and empty FDTs are intentionally
+  /// suppressed to defend against commercial-middleware crashes
+  /// on zero-file FDT-Instance documents). Without an FDT diff
+  /// signalling "TOI no longer in flight", the receiver's
+  /// abandoned-TOI logic doesn't fire — call this method when the
+  /// pump knows the session has ended (end-of-stream timeout, LCT
+  /// Close-Session, application-level signal). Idempotent;
+  /// returns the number of files completed by this call.
+  std::size_t flush_pending_decodes();
+
  private:
   std::mutex          _files_mutex;
   std::uint64_t       _tsi;

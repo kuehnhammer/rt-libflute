@@ -283,6 +283,7 @@ TEST(DecoderStats, RaptorLossyRoundTripDistinguishesSourceVsRepair) {
                   data_copy.data(), data_copy.size(),
                   LibFlute::FecScheme::Raptor);
     encoder.flush();
+    h.decoder.flush_pending_decodes();
     ASSERT_NE(h.received, nullptr);
 
     auto es = encoder.stats();

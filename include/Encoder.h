@@ -108,9 +108,20 @@ class Encoder {
    *                         multiple blocks. Memory: each worker
    *                         allocates its own scratch (≈ K·T) + per-K
    *                         intermediate buffer.
+   * @param fdt_expires_window_seconds  How far in the future the
+   *                         FDT-Instance Expires field is set when
+   *                         queue_fdt_locked() refreshes the FDT.
+   *                         Default 10s — covers caller-driven
+   *                         carousel cadences up to 5s with 2x
+   *                         safety. Carousel emission is caller-
+   *                         driven via requeue_fdt(); libflute is
+   *                         intentionally thread-free, so timing
+   *                         lives in the consumer's pump loop. Set
+   *                         to ~2x the carousel period.
    */
   Encoder(std::uint64_t tsi, unsigned mtu, std::uint32_t rate_limit_kbps,
-          PacketCallback packet_cb, unsigned fec_worker_threads = 0);
+          PacketCallback packet_cb, unsigned fec_worker_threads = 0,
+          unsigned fdt_expires_window_seconds = 10);
   ~Encoder();
 
   Encoder(const Encoder&)            = delete;
@@ -168,6 +179,22 @@ class Encoder {
 
   /// True iff at least one queued File still has symbols to transmit.
   bool has_pending() const;
+
+  /// Re-queue the current FDT for transmission. No-op if the FDT is
+  /// empty (no FileEntry currently registered) — at least one
+  /// commercial MBMS middleware crashes on receipt of an FDT that
+  /// lists zero files, so libflute defends against that centrally.
+  /// Idempotent — discards any in-flight FDT that hasn't fully
+  /// transmitted yet and queues a fresh copy with a refreshed
+  /// Expires (= now + fdt_expires_window). Receiver-side FDT-
+  /// supersession is already handled by the instance-ID
+  /// monotonicity logic.
+  ///
+  /// Caller-driven cadence: invoke from a timer in the consumer's
+  /// pump loop (typical 5G-MAG broadcast carousel period: 5 s).
+  /// libflute is intentionally thread-free; carousel timing lives
+  /// in the consumer next to send_next_packet() / flush().
+  void requeue_fdt();
 
   void register_completion_callback(CompletionCallback cb);
 
@@ -261,6 +288,7 @@ class Encoder {
   std::uint32_t _max_payload;
   std::uint32_t _rate_limit_kbps;
   unsigned      _fec_worker_threads;
+  unsigned      _fdt_expires_window_seconds;
 
   std::unique_ptr<FileDeliveryTable> _fdt;
   std::map<std::uint32_t, std::shared_ptr<File>> _files;

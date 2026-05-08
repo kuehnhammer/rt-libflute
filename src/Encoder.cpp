@@ -30,22 +30,20 @@ namespace {
 //   SBN(2) + ESI(2)        :  4 B
 constexpr std::size_t kFixedAlcOverhead = 20 + 8 + 12 + 4;
 
-// FDT-Instance "Expires" in NTP seconds, used when the encoder
-// auto-generates the FDT XML for the receivers.
-constexpr unsigned kFdtRepeatIntervalSeconds = 5;
-
 }  // namespace
 
 Encoder::Encoder(std::uint64_t tsi, unsigned mtu,
                   std::uint32_t rate_limit_kbps,
                   PacketCallback packet_cb,
-                  unsigned fec_worker_threads)
+                  unsigned fec_worker_threads,
+                  unsigned fdt_expires_window_seconds)
     : _packet_cb(std::move(packet_cb)),
       _tsi(tsi),
       _max_payload(static_cast<std::uint32_t>(
           (mtu > kFixedAlcOverhead) ? (mtu - kFixedAlcOverhead) : 0)),
       _rate_limit_kbps(rate_limit_kbps),
       _fec_worker_threads(fec_worker_threads),
+      _fdt_expires_window_seconds(fdt_expires_window_seconds),
       _packet_scratch(mtu) {
   constexpr std::uint32_t kDefaultMaxSourceBlockLength = 64;
   _fec_oti = FecOti{FecScheme::CompactNoCode, /*transfer_length*/ 0,
@@ -219,11 +217,25 @@ EncoderStats Encoder::stats() const {
 }
 
 void Encoder::queue_fdt_locked() {
+  // Empty-FDT defence. At least one commercial MBMS middleware
+  // (Qualcomm) crashes hard on receipt of an FDT-Instance that
+  // lists zero <File> entries; centralising the skip here covers
+  // both the carousel path (requeue_fdt → caller-driven) and the
+  // event-driven on-completion path (file_transmitted_locked →
+  // FDT becomes empty when the last queued file finishes). One
+  // check at the top of queue_fdt_locked is the single point of
+  // truth.
+  if (_fdt->file_entries().empty()) {
+    spdlog::trace("Encoder::queue_fdt: FDT has zero file entries — skipping emit");
+    return;
+  }
+
   // Refresh the FDT XML and queue it as the special TOI=0 File. Any
   // previous incomplete FDT is discarded — receivers handle in-flight
   // FDT supersession via the round-4 instance-ID monotonicity logic.
-  _fdt->set_expires(seconds_since_epoch() +
-                     kFdtRepeatIntervalSeconds * 2ULL);
+  const std::uint64_t expires_ntp =
+      seconds_since_epoch() + _fdt_expires_window_seconds;
+  _fdt->set_expires(expires_ntp);
   auto fdt_xml = _fdt->to_string();
 
   FecOti fdt_oti      = _fec_oti;
@@ -232,7 +244,7 @@ void Encoder::queue_fdt_locked() {
   try {
     auto fdt_file = std::make_shared<File>(
         /*toi*/ 0, fdt_oti, std::string{}, std::string{},
-        seconds_since_epoch() + kFdtRepeatIntervalSeconds * 2ULL,
+        expires_ntp,
         fdt_xml.data(), fdt_xml.size(),
         /*copy_data*/ true);
     fdt_file->set_fdt_instance_id(_fdt->instance_id());
@@ -240,6 +252,11 @@ void Encoder::queue_fdt_locked() {
   } catch (const std::exception& ex) {
     spdlog::error("Encoder::queue_fdt: {}", ex.what());
   }
+}
+
+void Encoder::requeue_fdt() {
+  const std::lock_guard<std::mutex> lock(_mutex);
+  queue_fdt_locked();
 }
 
 void Encoder::file_transmitted_locked(std::uint32_t toi) {

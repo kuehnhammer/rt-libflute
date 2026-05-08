@@ -242,4 +242,116 @@ TEST(EncoderSend, RaptorRedundancyLevelDrivesRepairSymbolCount) {
 }
 #endif  // RAPTOR_ENABLED
 
+// FDT carousel: requeue_fdt() re-queues the current FDT for tune-in
+// robustness. The cadence is caller-driven (libflute is thread-free)
+// — typical 5G-MAG broadcast carousel period is 5 s.
+//
+// Test shape: queue a file large enough that emit takes more than
+// one packet, pump just the FDT bytes, requeue mid-stream while the
+// file is still in flight (FDT still non-empty), then pump the rest.
+// The second FDT must produce additional FDT-packet emits.
+TEST(EncoderFdtCarousel, RequeueFdtMidStreamEmitsAdditionalFdtPackets) {
+  CapturingEncoder cap;
+
+  // ~34 file packets at mtu=1500 — plenty of room to interleave a
+  // requeue while the file is still pumping.
+  std::string payload(50000, 'x');
+  auto toi = cap.encoder().send(
+      "x.bin", "application/octet-stream",
+      LibFlute::Encoder::seconds_since_epoch() + 60, payload.data(),
+      payload.size(), LibFlute::FecScheme::CompactNoCode,
+      /*copy_buffer=*/true);
+  ASSERT_NE(toi, 0U);
+
+  // Pump until the first FDT packet has gone out. Defensive cap on
+  // iterations so a regression that drops FDT emit can't loop the
+  // test indefinitely.
+  for (std::size_t i = 0; i < 1024; ++i) {
+    if (cap.encoder().stats().fdt_packets_emitted > 0) break;
+    cap.encoder().send_next_packet();
+  }
+  const auto fdt_count_before =
+      cap.encoder().stats().fdt_packets_emitted;
+  ASSERT_GT(fdt_count_before, 0U);
+
+  // Re-queue mid-stream — FDT still has the in-flight file, so the
+  // empty-FDT skip doesn't fire.
+  cap.encoder().requeue_fdt();
+  cap.encoder().flush();
+
+  EXPECT_GT(cap.encoder().stats().fdt_packets_emitted,
+             fdt_count_before)
+      << "requeue_fdt() should have emitted additional FDT packets";
+}
+
+// Empty-FDT defence. At least one commercial MBMS middleware
+// (Qualcomm) crashes on receipt of an FDT-Instance that lists zero
+// <File> entries; libflute defends against that centrally — both
+// the public requeue_fdt() and the internal queue_fdt_locked() path
+// (fired by file_transmitted_locked) must skip emit when no files
+// are registered.
+TEST(EncoderFdtCarousel, RequeueFdtIsNoOpWhenFdtEmpty) {
+  CapturingEncoder cap;
+
+  // Fresh encoder: no files queued, FDT is empty.
+  ASSERT_EQ(cap.encoder().stats().fdt_packets_emitted, 0U);
+
+  cap.encoder().requeue_fdt();
+  cap.encoder().flush();
+
+  EXPECT_EQ(cap.encoder().stats().fdt_packets_emitted, 0U)
+      << "requeue_fdt() must skip emit when no files are registered "
+         "— commercial MBMS middleware crashes on zero-file FDTs";
+}
+
+// fdt_expires_window_seconds drives the FDT-Instance Expires field.
+// Caller picks a window matching their carousel cadence; default is
+// 10 s. The Expires must land in the configured window relative to
+// the time of FDT emit.
+TEST(EncoderFdtCarousel, FdtExpiresWindowIsConfigurable) {
+  std::vector<std::vector<std::uint8_t>> packets;
+  LibFlute::Encoder enc(
+      /*tsi=*/1, /*mtu=*/1500, /*rate_limit_kbps=*/0,
+      [&](std::span<const std::uint8_t> p) {
+        packets.emplace_back(p.begin(), p.end());
+        return true;
+      },
+      /*fec_worker_threads=*/0, /*fdt_expires_window_seconds=*/30);
+
+  std::string payload(2048, 'x');
+  enc.send("x.bin", "application/octet-stream",
+            LibFlute::Encoder::seconds_since_epoch() + 60, payload.data(),
+            payload.size(), LibFlute::FecScheme::CompactNoCode,
+            /*copy_buffer=*/true);
+  const auto t_emit = LibFlute::Encoder::seconds_since_epoch();
+  enc.flush();
+
+  // Pull the FDT XML and parse the Expires attribute. The encoder
+  // sets it to (seconds_since_epoch() at queue_fdt_locked time +
+  // window). We sample t_emit just before flush; the actual emit
+  // is microseconds later, so allow a small fuzz around the
+  // expected window.
+  std::string xml;
+  for (const auto& p : packets) {
+    std::string s(reinterpret_cast<const char*>(p.data()), p.size());
+    if (auto pos = s.find("<FDT-Instance"); pos != std::string::npos) {
+      xml = s.substr(pos);
+      break;
+    }
+  }
+  ASSERT_FALSE(xml.empty());
+  const auto expires_pos = xml.find("Expires=\"");
+  ASSERT_NE(expires_pos, std::string::npos);
+  const auto value_start = expires_pos + std::string("Expires=\"").size();
+  const auto value_end   = xml.find('"', value_start);
+  ASSERT_NE(value_end, std::string::npos);
+  const auto expires_val = std::stoull(
+      xml.substr(value_start, value_end - value_start));
+
+  EXPECT_GE(expires_val, t_emit + 28)  // 30s window minus 2s fuzz
+      << "Expires=" << expires_val << " too close to t_emit=" << t_emit;
+  EXPECT_LE(expires_val, t_emit + 32)  // 30s window plus 2s fuzz
+      << "Expires=" << expires_val << " too far from t_emit=" << t_emit;
+}
+
 }  // namespace
