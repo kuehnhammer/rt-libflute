@@ -553,7 +553,7 @@ int main() {
     // exactly one block per file pays the decode cost.
     const std::vector<std::pair<std::uint32_t, std::uint32_t>>
         kSrcDrops{{0u, 5u}, {0u, 7u}};
-    constexpr unsigned kBenchRedundancyPercent = 5u;
+    [[maybe_unused]] constexpr unsigned kBenchRedundancyPercent = 5u;
 
     PrintHeader(mtu);
     for (auto F : ParseSizesEnv()) {
