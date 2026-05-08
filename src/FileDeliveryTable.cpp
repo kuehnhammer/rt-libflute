@@ -145,7 +145,8 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_
   }
 }
 
-LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len)
+LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len,
+                                                 unsigned fec_dec_worker_threads)
   : _instance_id( instance_id )
 {
   tinyxml2::XMLDocument doc(true, tinyxml2::COLLAPSE_WHITESPACE);
@@ -295,11 +296,13 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     switch (encoding_id){
 #ifdef RAPTOR_ENABLED
       case (int) FecScheme::Raptor:
-        fec_transformer = std::make_shared<RaptorFEC>(FecScheme::Raptor);
+        fec_transformer = std::make_shared<RaptorFEC>(
+            FecScheme::Raptor, fec_dec_worker_threads);
         spdlog::debug("Received FDT entry for an R10 (Raptor) encoded file");
         break;
       case (int) FecScheme::RaptorQ:
-        fec_transformer = std::make_shared<RaptorFEC>(FecScheme::RaptorQ);
+        fec_transformer = std::make_shared<RaptorFEC>(
+            FecScheme::RaptorQ, fec_dec_worker_threads);
         spdlog::debug("Received FDT entry for a RaptorQ encoded file");
         break;
 #endif

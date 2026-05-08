@@ -43,8 +43,12 @@ namespace LibFlute {
       *  @param instance_id FDT instance ID (from ALC headers)
       *  @param buffer String containing the FDT XML
       *  @param len Length of the buffer
+      *  @param fec_dec_worker_threads Worker count for the parallel
+      *         TryDecode pool used at end-of-transmission (per-file
+      *         RaptorFEC). 0 = sequential (default).
       */
-      FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len);
+      FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len,
+                         unsigned fec_dec_worker_threads = 0);
 
      /**
       *  Default destructor.

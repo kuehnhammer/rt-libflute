@@ -213,7 +213,11 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
     auto data = std::make_unique<char[]>(cfg.F);
     FillDeterministic(data.get(), cfg.F);
 
-    LibFlute::Decoder decoder(/*tsi=*/16);
+    unsigned dec_workers = 0;
+    if (const char* w = std::getenv("FLUTE_DEC_WORKERS"); w && *w) {
+        dec_workers = static_cast<unsigned>(std::strtoul(w, nullptr, 10));
+    }
+    LibFlute::Decoder decoder(/*tsi=*/16, dec_workers);
     std::shared_ptr<LibFlute::File> received;
     decoder.register_completion_callback(
         [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });

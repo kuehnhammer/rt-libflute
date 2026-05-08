@@ -79,6 +79,16 @@ namespace LibFlute {
       // The lent span passed to Decoder::Create(params, span) is a
       // K·T slice of this buffer.
       char* _dec_file_buffer = nullptr;
+      // Worker count for the parallel TryDecode pool used at
+      // try_decode_pending (end-of-transmission FDT trigger). 0 ⇒
+      // sequential. Mid-stream lossless decode happens via the
+      // codec's auto-finalise inside AddReceivedSymbol regardless;
+      // workers only kick in when ≥1 source ESI was lost in ≥1 block
+      // and Z > 1 (distributed-fade reception pattern). Each worker
+      // calls dec->TryDecode() on a different SBN's per-SBN Decoder;
+      // no shared state contention since each Decoder owns its
+      // scratch + a non-overlapping slice of File::_buffer.
+      unsigned _dec_worker_threads = 0;
 
       // Encoder-side single shared symbol scratch. Holds at most
       // max(target_K) × T bytes — one source block's worth, laid out
@@ -223,8 +233,13 @@ namespace LibFlute {
       // Decoder-side empty ctor. The scheme is supplied so AlcPacket /
       // EncodingSymbol can dispatch on the correct FEC-Payload-ID width
       // before parse_fdt_info has had a chance to populate the rest.
-      explicit RaptorFEC(LibFlute::FecScheme scheme);
-      RaptorFEC() : RaptorFEC(LibFlute::FecScheme::Raptor) {}
+      // `dec_worker_threads` ⇒ size of the parallel TryDecode pool used
+      // at try_decode_pending (FDT end-of-transmission). 0 = sequential.
+      // Bounded per-file by Z; useful at Z ≥ 2 with distributed loss
+      // (multiple SBNs needing matrix-solve).
+      explicit RaptorFEC(LibFlute::FecScheme scheme,
+                          unsigned dec_worker_threads = 0);
+      RaptorFEC() : RaptorFEC(LibFlute::FecScheme::Raptor, 0) {}
 
       ~RaptorFEC() override;
 

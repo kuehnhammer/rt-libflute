@@ -442,6 +442,98 @@ INSTANTIATE_TEST_SUITE_P(
                std::to_string(std::get<3>(info.param));
     });
 
+// Phase 2: parallel TryDecode across SBNs at end-of-transmission.
+// Constructs a multi-block file, distributes packet loss across all
+// blocks (so multiple SBNs end up rank-deficient and need matrix-
+// solve), and exercises the parallel TryDecode path on the Decoder
+// side. Must pass under ASan/UBSan to validate thread safety: each
+// per-SBN Decoder owns its own scratch + a non-overlapping slice
+// of File::_buffer, so concurrent matrix-solve calls must complete
+// without data races or aliasing violations.
+class RaptorParallelDecode
+    : public ::testing::TestWithParam<
+          std::tuple<LibFlute::FecScheme, std::size_t, unsigned, unsigned, int>> {};
+
+TEST_P(RaptorParallelDecode, ParallelDecodeAcrossSbns) {
+    const auto [scheme, F, mtu, workers, drop_every] = GetParam();
+    const auto data = MakeBuffer(F);
+
+    // Decoder constructed with the parametrised worker count. 0 ⇒
+    // sequential matrix-solve; > 0 ⇒ parallel pool kicks in at
+    // try_decode_pending.
+    LibFlute::Decoder decoder(/*tsi=*/16, workers);
+    std::shared_ptr<LibFlute::File> received;
+    decoder.register_completion_callback(
+        [&](std::shared_ptr<LibFlute::File> f) { received = std::move(f); });
+
+    std::size_t file_packet_idx = 0;
+    std::size_t dropped         = 0;
+
+    LibFlute::Encoder encoder(
+        /*tsi=*/16, mtu, /*rate_limit_kbps=*/0,
+        [&](std::span<const std::uint8_t> p) -> bool {
+            if (ToiOf(p) != 0) {
+                ++file_packet_idx;
+                if (drop_every > 0 &&
+                    file_packet_idx %
+                            static_cast<std::size_t>(drop_every) == 0) {
+                    ++dropped;
+                    return true;
+                }
+            }
+            decoder.feed_packet(p);
+            return true;
+        });
+
+    LibFlute::FileTransmissionConfig cfg;
+    cfg.scheme               = scheme;
+    cfg.fec_redundancy_level =
+        (scheme == LibFlute::FecScheme::Raptor) ? 15u : 5u;
+
+    auto data_copy = data;
+    auto toi = encoder.send("parallel-decode.bin", "application/octet-stream",
+                              LibFlute::Encoder::seconds_since_epoch() + 60,
+                              data_copy.data(), data_copy.size(), cfg,
+                              /*copy_buffer=*/false);
+    ASSERT_NE(toi, 0U);
+    encoder.flush();
+
+    EXPECT_GT(dropped, 0U) << "loss harness didn't fire — test isn't "
+                              "exercising the matrix-solve / parallel-decode path";
+    ASSERT_NE(received, nullptr)
+        << "decoder failed to reconstruct after dropping " << dropped
+        << " packets at workers=" << workers;
+    EXPECT_TRUE(received->complete());
+    ASSERT_EQ(received->length(), F);
+    EXPECT_EQ(std::memcmp(received->buffer(), data.data(), F), 0)
+        << "reconstructed bytes differ from sent at scheme="
+        << static_cast<int>(scheme) << " F=" << F << " workers=" << workers;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Sizes, RaptorParallelDecode,
+    ::testing::Values(
+        // (scheme, F, mtu, workers, drop_every) — F sized to produce
+        // Z>1 (R10 K_max=8192 → F=16 MB ⇒ Z=2; RaptorQ at WS=16M
+        // KL_max≈2722 → F=8 MB ⇒ Z=2). drop_every=37 distributes
+        // losses across all blocks; the inter-drop spacing isn't a
+        // factor of K so drops fall on a mix of source and repair
+        // ESIs across every SBN. workers=0 (sequential) vs 4
+        // (parallel) verifies both paths produce identical bytes.
+        std::make_tuple(LibFlute::FecScheme::Raptor,  16u << 20, 1500U, 0u, 37),
+        std::make_tuple(LibFlute::FecScheme::Raptor,  16u << 20, 1500U, 4u, 37),
+        std::make_tuple(LibFlute::FecScheme::RaptorQ,  8u << 20, 1500U, 0u, 37),
+        std::make_tuple(LibFlute::FecScheme::RaptorQ,  8u << 20, 1500U, 4u, 37)
+        ),
+    [](const ::testing::TestParamInfo<RaptorParallelDecode::ParamType>& info) {
+        const char* name =
+            (std::get<0>(info.param) == LibFlute::FecScheme::Raptor)
+                ? "R10" : "RaptorQ";
+        return std::string(name) + "_F" +
+               std::to_string(std::get<1>(info.param)) + "_w" +
+               std::to_string(std::get<3>(info.param));
+    });
+
 // RaptorQ (RFC 6330) round-trip. Wire-format is symmetric with R10
 // at the libflute layer (LCT codepoint 6, FEC Payload ID = SBN(8) +
 // ESI(24), 4-byte SSI laid out as Z(1)+N(2)+Al(1)). Codec is the

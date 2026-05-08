@@ -31,7 +31,9 @@ std::uint64_t ntp_seconds_now() {
          2'208'988'800ULL;
 }
 
-Decoder::Decoder(std::uint64_t tsi) : _tsi(tsi) {}
+Decoder::Decoder(std::uint64_t tsi, unsigned fec_dec_worker_threads)
+    : _tsi(tsi)
+    , _fec_dec_worker_threads(fec_dec_worker_threads) {}
 
 void Decoder::register_completion_callback(CompletionCallback cb) {
   const std::lock_guard<std::mutex> lock(_files_mutex);
@@ -183,7 +185,8 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
           if (alc.toi() == 0) {  // parse complete FDT
             auto candidate = std::make_unique<FileDeliveryTable>(
                 alc.fdt_instance_id(), _files[alc.toi()]->buffer(),
-                _files[alc.toi()]->length());
+                _files[alc.toi()]->length(),
+                _fec_dec_worker_threads);
             _files.erase(alc.toi());
 
             // RFC 6726 §3.3: an FDT-Instance MUST NOT be relied upon

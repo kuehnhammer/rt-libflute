@@ -105,7 +105,17 @@ class Decoder {
   using CompletionCallback = std::function<void(std::shared_ptr<File>)>;
   using NowProvider        = std::function<std::uint64_t()>;
 
-  explicit Decoder(std::uint64_t tsi);
+  /// @param tsi  Transport Stream Identifier for this session.
+  /// @param fec_dec_worker_threads  Worker count for the parallel
+  ///        TryDecode pool used by Raptor / RaptorQ files at end-of-
+  ///        transmission. 0 ⇒ sequential matrix-solve (today's
+  ///        behaviour). Non-zero ⇒ up to N threads run TryDecode
+  ///        concurrently across distinct SBNs of one file. Useful at
+  ///        Z ≥ 2 with distributed loss (multiple SBNs need matrix-
+  ///        solve, e.g. burst-fade reception); no benefit when loss
+  ///        concentrates in one SBN. Each per-SBN Decoder owns its
+  ///        own scratch (~K·T-class) so workers don't contend.
+  explicit Decoder(std::uint64_t tsi, unsigned fec_dec_worker_threads = 0);
   ~Decoder() = default;
 
   Decoder(const Decoder&)            = delete;
@@ -145,6 +155,7 @@ class Decoder {
  private:
   std::mutex          _files_mutex;
   std::uint64_t       _tsi;
+  unsigned            _fec_dec_worker_threads;
   NowProvider         _now             = ntp_seconds_now;
   std::unique_ptr<FileDeliveryTable> _fdt;
   std::map<std::uint64_t, std::shared_ptr<File>> _files;

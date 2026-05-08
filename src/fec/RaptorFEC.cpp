@@ -263,8 +263,12 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
   nof_large_source_blocks   = ZL;
 }
 
-LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme)
-    : _bitstem_scheme(to_bitstem_scheme(scheme))
+LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme,
+                                unsigned dec_worker_threads)
+    // Init order matches member declaration order in RaptorFEC.h
+    // (Wreorder-ctor under -Werror).
+    : _dec_worker_threads(dec_worker_threads)
+    , _bitstem_scheme(to_bitstem_scheme(scheme))
     , _fec_scheme(scheme)
 {}
 
@@ -436,20 +440,84 @@ bool LibFlute::RaptorFEC::try_decode_pending(
     std::vector<LibFlute::SourceBlock>& blocks) {
   if (is_encoder) return false;
 
+  // Snapshot SBNs that still need a TryDecode pass. A block is
+  // "pending" iff it has accumulated receive state (DecoderCtx
+  // exists) but the codec hasn't finalised yet (auto-finalise
+  // didn't fire because at least one source ESI was lost). The
+  // lossless cases finalised in-line via AddReceivedSymbol and
+  // appear here with IsDecoded() == true — skip those.
+  std::vector<std::uint16_t> pending;
+  pending.reserve(_dec_ctxs.size());
+  for (auto& [sbn, ctx] : _dec_ctxs) {
+    if (ctx.dec.has_value() && !ctx.dec->IsDecoded()) {
+      pending.push_back(sbn);
+    }
+  }
+  if (pending.empty()) {
+    return false;
+  }
+
+  // Parallel-dispatch budget: capped at the number of pending SBNs
+  // (extra workers buy nothing — each worker handles one SBN at a
+  // time, and the pool tears down when the queue drains).
+  const unsigned worker_budget = std::min<unsigned>(
+      _dec_worker_threads, static_cast<unsigned>(pending.size()));
+
+  // `std::vector<bool>` is packed; concurrent writes to "different"
+  // indices share a backing word and TSan flags it as a race
+  // (correctly — the bit stores aren't atomic). Use uint8_t so each
+  // element gets its own byte.
+  std::vector<std::uint8_t> ok_per_pending(pending.size(), 0u);
+
+  if (worker_budget <= 1u) {
+    // Sequential path. Two cases hit this:
+    //   * _dec_worker_threads == 0 (caller didn't opt in).
+    //   * pending.size() == 1 (only one block needs matrix-solve;
+    //     workers wouldn't help).
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+      DecoderCtx& ctx = _dec_ctxs.at(pending[i]);
+      ok_per_pending[i] = ctx.dec->TryDecode() ? 1u : 0u;
+    }
+  } else {
+    // Parallel path. Each worker pulls a pending SBN off `next` and
+    // runs TryDecode on that SBN's Decoder. Per-SBN Decoders own
+    // disjoint scratch + non-overlapping slices of File::_buffer
+    // (the lent-buffer model's aliasing contract guarantees safe
+    // concurrent writes), so no synchronisation around the matrix-
+    // solve itself is required — only the SBN claim is atomic.
+    std::atomic<std::size_t> next{0};
+    std::vector<std::thread> threads;
+    threads.reserve(worker_budget);
+    for (unsigned w = 0; w < worker_budget; ++w) {
+      threads.emplace_back([&]() {
+        while (true) {
+          const auto idx =
+              next.fetch_add(1, std::memory_order_acq_rel);
+          if (idx >= pending.size()) {
+            return;
+          }
+          DecoderCtx& ctx = _dec_ctxs.at(pending[idx]);
+          ok_per_pending[idx] = ctx.dec->TryDecode() ? 1u : 0u;
+        }
+      });
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+  }
+
+  // Fold worker results back into the SourceBlock vector.
   bool any_decoded = false;
-  for (auto& srcblk : blocks) {
-    auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
-    if (it == _dec_ctxs.end()) continue;        // no symbols received
-    DecoderCtx& ctx = it->second;
-    if (ctx.dec->IsDecoded()) continue;          // already done
-    if (ctx.dec->TryDecode()) {
-      srcblk.complete = true;
-      any_decoded     = true;
+  for (std::size_t i = 0; i < pending.size(); ++i) {
+    const auto sbn = pending[i];
+    if (ok_per_pending[i] != 0u) {
+      blocks[sbn].complete = true;
+      any_decoded = true;
       spdlog::debug("Raptor: decoded source block {} on end-of-transmission trigger",
-                    srcblk.id);
+                    sbn);
     } else {
       spdlog::debug("Raptor: decode failed for source block {} (insufficient symbols)",
-                    srcblk.id);
+                    sbn);
     }
   }
   return any_decoded;
