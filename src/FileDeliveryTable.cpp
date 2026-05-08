@@ -146,7 +146,7 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, FecOti fec_
 }
 
 LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffer, size_t len,
-                                                 unsigned fec_dec_worker_threads)
+                                                 [[maybe_unused]] unsigned fec_dec_worker_threads)
   : _instance_id( instance_id )
 {
   tinyxml2::XMLDocument doc(true, tinyxml2::COLLAPSE_WHITESPACE);
