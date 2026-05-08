@@ -38,10 +38,10 @@ namespace {
 // Map libflute's wire-level FecScheme to the bitstem-fec codec
 // selection enum. Throws on schemes RaptorFEC doesn't handle (those
 // are routed to other transformers / CompactNoCode upstream).
-bitstem::fec::Scheme to_bitstem_scheme(LibFlute::FecScheme s) {
+bitstem_fec_scheme_t to_bitstem_scheme(LibFlute::FecScheme s) {
   switch (s) {
-    case LibFlute::FecScheme::Raptor:  return bitstem::fec::Scheme::kR10;
-    case LibFlute::FecScheme::RaptorQ: return bitstem::fec::Scheme::kRaptorQ;
+    case LibFlute::FecScheme::Raptor:  return BITSTEM_FEC_SCHEME_R10;
+    case LibFlute::FecScheme::RaptorQ: return BITSTEM_FEC_SCHEME_RAPTORQ;
     default:
       throw std::invalid_argument(
           "RaptorFEC: unsupported FecScheme (only Raptor / RaptorQ)");
@@ -62,6 +62,25 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
     , F(fec_oti.transfer_length)
     , P(fec_oti.encoding_symbol_length)
 {
+  // Codec presence check. libflute has no link-time dependency on
+  // libfec.so, so production builds may legitimately ship without
+  // it (operator deploys 5gr without an FEC license). Surface the
+  // condition as a runtime exception here rather than letting the
+  // first dlsym'd nullptr SIGSEGV later inside fill_block_into_-
+  // scratch / ensure_dec_ctx.
+  auto& loader = FecLoader::instance();
+  if (!loader.available()) {
+    throw std::runtime_error(
+        "RaptorFEC: bitstem-fec runtime (libfec.so.0) is not "
+        "available — install the codec to enable Raptor / RaptorQ");
+  }
+  if (!loader.has_scheme(_bitstem_scheme)) {
+    throw std::runtime_error(
+        "RaptorFEC: bitstem-fec was built without support for "
+        "the requested scheme — rebuild libfec with the relevant "
+        "FEC_ENABLE_<scheme> option");
+  }
+
   if (fec_redundancy_level.has_value()) {
     surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
   }
@@ -270,7 +289,22 @@ LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme,
     : _dec_worker_threads(dec_worker_threads)
     , _bitstem_scheme(to_bitstem_scheme(scheme))
     , _fec_scheme(scheme)
-{}
+{
+  // Same presence check as the encode-side ctor — the loader probes
+  // libfec.so.0 once per process, so this is just a flag read after
+  // the first construction.
+  auto& loader = FecLoader::instance();
+  if (!loader.available()) {
+    throw std::runtime_error(
+        "RaptorFEC: bitstem-fec runtime (libfec.so.0) is not "
+        "available — install the codec to enable Raptor / RaptorQ");
+  }
+  if (!loader.has_scheme(_bitstem_scheme)) {
+    throw std::runtime_error(
+        "RaptorFEC: bitstem-fec was built without support for "
+        "the requested scheme");
+  }
+}
 
 LibFlute::RaptorFEC::~RaptorFEC() {
   // Tear down the parallel-encode worker pool, if active. Idempotent
@@ -318,42 +352,45 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
   // to Z·KL·target_K-overhead·T (see allocate_file_buffer) so the
   // K·T slice always lies within it, even for the trailing block
   // when F % T != 0.
-  const std::span<std::byte> span(
-      reinterpret_cast<std::byte*>(_dec_file_buffer + byte_off),
-      static_cast<std::size_t>(nsymbs) * T);
+  const std::size_t lent_len = static_cast<std::size_t>(nsymbs) * T;
+  std::uint8_t* const lent_ptr =
+      reinterpret_cast<std::uint8_t*>(_dec_file_buffer + byte_off);
 
   spdlog::debug("Constructing FEC decoder for SBN {}: K={} blocksize={} (lent buffer)",
                 sbn, nsymbs, blocksize);
 
-  // Mirrors the encode-side EncoderParams plumbing: scheme + Al + N
-  // come from the parsed FEC OTI's scheme-specific info (set in
+  // Mirrors the encode-side params plumbing: scheme + Al + N come
+  // from the parsed FEC OTI's scheme-specific info (set in
   // parse_fdt_info) and flow verbatim into the codec, so the
   // decoder's sub-block layout matches what the sender declared.
-  bitstem::fec::DecoderParams params;
-  params.K      = static_cast<std::uint16_t>(nsymbs);
-  params.T      = static_cast<std::uint16_t>(T);
-  params.scheme = _bitstem_scheme;
-  params.Al     = static_cast<std::uint8_t>(Al);
-  params.N      = static_cast<std::uint16_t>(N);
-  // Source-order layout: tells the codec our lent buffer (= File::-
-  // _buffer slice) is laid out as K source symbols × T bytes
+  // Source-order layout: tells the codec our lent buffer (=
+  // File::_buffer slice) is laid out as K source symbols × T bytes
   // contiguous, matching the file's natural byte order. At N>1 the
   // codec wrapper de-interleaves into its inner sub-block-major
   // working buffer on TryDecode and back out into the lent buffer
   // on completion — without this hint, a wire-cberner-compatible
   // sender's bytes land sub-block-major in File::_buffer and the
   // receiver's file content diverges.
-  params.layout = bitstem::fec::LayoutHint::kSourceOrder;
-  auto dec = bitstem::fec::fast::Decoder::Create(params, span);
-  if (!dec.has_value()) {
-    spdlog::error("bitstem::fec::Decoder::Create(span) failed for SBN {} K={} scheme={} Al={} N={}",
+  bitstem_fec_params_t params{};
+  params.K      = static_cast<std::uint16_t>(nsymbs);
+  params.T      = static_cast<std::uint16_t>(T);
+  params.scheme = _bitstem_scheme;
+  params.Al     = static_cast<std::uint8_t>(Al);
+  params.N      = static_cast<std::uint16_t>(N);
+  params.layout = BITSTEM_FEC_LAYOUT_SOURCE_ORDER;
+
+  auto& loader = FecLoader::instance();
+  bitstem_fec_decoder_t* raw =
+      loader.decoder_create(&params, lent_ptr, lent_len);
+  if (raw == nullptr) {
+    spdlog::error("bitstem_fec_decoder_create failed for SBN {} K={} scheme={} Al={} N={}",
                   sbn, nsymbs, static_cast<int>(_bitstem_scheme),
                   params.Al, params.N);
     throw std::runtime_error("FEC decoder construction failed");
   }
 
   DecoderCtx ctx;
-  ctx.dec        = std::move(dec);
+  ctx.dec        = DecoderHandle(raw);
   ctx.K          = static_cast<std::uint16_t>(nsymbs);
   ctx.block_size = static_cast<std::uint32_t>(blocksize);
   auto [iter, _inserted] = _dec_ctxs.emplace(sbn, std::move(ctx));
@@ -365,7 +402,8 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
                                           std::span<const std::byte> bytes) {
   assert(bytes.size() == T);
   DecoderCtx& ctx = ensure_dec_ctx(static_cast<std::uint16_t>(srcblk.id));
-  if (ctx.dec->IsDecoded()) {
+  auto& loader = FecLoader::instance();
+  if (loader.decoder_is_decoded(ctx.dec.get()) != 0) {
     // Block already decoded (almost always via the codec's lossless
     // auto-finalise on the K-th source ESI). Subsequent repair-
     // symbol packets carry redundancy we no longer need.
@@ -373,7 +411,10 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
                   srcblk.id, id);
     return true;
   }
-  ctx.dec->AddReceivedSymbol(id, bytes);
+  loader.decoder_add_received_symbol(
+      ctx.dec.get(), id,
+      reinterpret_cast<const std::uint8_t*>(bytes.data()),
+      bytes.size());
   return true;
 }
 
@@ -433,7 +474,8 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
   // undecoded blocks at the natural batch boundary.
   auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
   if (it == _dec_ctxs.end()) return false;
-  return it->second.dec.has_value() && it->second.dec->IsDecoded();
+  if (it->second.dec == nullptr) return false;
+  return FecLoader::instance().decoder_is_decoded(it->second.dec.get()) != 0;
 }
 
 bool LibFlute::RaptorFEC::try_decode_pending(
@@ -446,10 +488,12 @@ bool LibFlute::RaptorFEC::try_decode_pending(
   // didn't fire because at least one source ESI was lost). The
   // lossless cases finalised in-line via AddReceivedSymbol and
   // appear here with IsDecoded() == true — skip those.
+  auto& loader = FecLoader::instance();
   std::vector<std::uint16_t> pending;
   pending.reserve(_dec_ctxs.size());
   for (auto& [sbn, ctx] : _dec_ctxs) {
-    if (ctx.dec.has_value() && !ctx.dec->IsDecoded()) {
+    if (ctx.dec != nullptr &&
+        loader.decoder_is_decoded(ctx.dec.get()) == 0) {
       pending.push_back(sbn);
     }
   }
@@ -476,7 +520,8 @@ bool LibFlute::RaptorFEC::try_decode_pending(
     //     workers wouldn't help).
     for (std::size_t i = 0; i < pending.size(); ++i) {
       DecoderCtx& ctx = _dec_ctxs.at(pending[i]);
-      ok_per_pending[i] = ctx.dec->TryDecode() ? 1u : 0u;
+      ok_per_pending[i] =
+          loader.decoder_try_decode(ctx.dec.get()) != 0 ? 1u : 0u;
     }
   } else {
     // Parallel path. Each worker pulls a pending SBN off `next` and
@@ -497,7 +542,8 @@ bool LibFlute::RaptorFEC::try_decode_pending(
             return;
           }
           DecoderCtx& ctx = _dec_ctxs.at(pending[idx]);
-          ok_per_pending[idx] = ctx.dec->TryDecode() ? 1u : 0u;
+          ok_per_pending[idx] =
+              loader.decoder_try_decode(ctx.dec.get()) != 0 ? 1u : 0u;
         }
       });
     }
@@ -598,17 +644,18 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
   // buffer is allocated once instead of per block. Per the
   // r10_bench encode-reset measurement at K=8000 / T=1424, Reset
   // is 13.9 ms vs Create's 22.6 ms — a 39 % per-call saving.
+  auto& loader = FecLoader::instance();
   EncSlot* slot_ptr = nullptr;
   for (auto& slot : _enc_slots) {
-    if (slot.enc.has_value() && slot.K == nsymbs) {
+    if (slot.enc != nullptr && slot.K == nsymbs) {
       slot_ptr = &slot;
       break;
     }
   }
   if (slot_ptr == nullptr) {
     for (auto& slot : _enc_slots) {
-      if (!slot.enc.has_value()) {
-        bitstem::fec::EncoderParams params;
+      if (slot.enc == nullptr) {
+        bitstem_fec_params_t params{};
         params.K      = static_cast<std::uint16_t>(nsymbs);
         params.T      = static_cast<std::uint16_t>(T);
         params.scheme = _bitstem_scheme;
@@ -618,16 +665,16 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
         // verbatim (memcpy from _enc_src_buffer), source-order. At
         // N>1 this lets the codec skip its internal transpose into
         // sub-block-major and feed the inner codec directly.
-        params.layout = bitstem::fec::LayoutHint::kSourceOrder;
-        auto enc = bitstem::fec::fast::Encoder::Create(params);
-        if (!enc.has_value()) {
-          spdlog::error("bitstem::fec::Encoder::Create failed for SBN {} K={} scheme={} Al={} N={}",
+        params.layout = BITSTEM_FEC_LAYOUT_SOURCE_ORDER;
+        bitstem_fec_encoder_t* raw = loader.encoder_create(&params);
+        if (raw == nullptr) {
+          spdlog::error("bitstem_fec_encoder_create failed for SBN {} K={} scheme={} Al={} N={}",
                         blockid, nsymbs, static_cast<int>(_bitstem_scheme),
                         params.Al, params.N);
           throw std::runtime_error("Error creating FEC encoder");
         }
         slot.K   = static_cast<std::uint16_t>(nsymbs);
-        slot.enc = std::move(*enc);
+        slot.enc = EncoderHandle(raw);
         slot_ptr = &slot;
         break;
       }
@@ -637,17 +684,17 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
           "RaptorFEC: more than 2 distinct K values requested for one file");
     }
   }
-  auto& enc = *slot_ptr->enc;
-  enc.Reset(std::span<const std::byte>(
-      reinterpret_cast<const std::byte*>(_enc_scratch.data()),
-      padded_size));
+  bitstem_fec_encoder_t* enc = slot_ptr->enc.get();
+  loader.encoder_reset(
+      enc,
+      reinterpret_cast<const std::uint8_t*>(_enc_scratch.data()),
+      padded_size);
 
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
     char* slot = _enc_scratch.data() + esi * T;
     if (esi >= nsymbs) {
-      enc.EncodeSymbol(esi,
-                       std::span<std::byte>(
-                           reinterpret_cast<std::byte*>(slot), T));
+      loader.encoder_encode_symbol(
+          enc, esi, reinterpret_cast<std::uint8_t*>(slot), T);
     }
     // Source ESIs (esi < nsymbs) reuse the bytes already memcpy'd in
     // — r10's LT for esi<K reproduces the source symbol verbatim.
@@ -795,29 +842,30 @@ void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
   // subsequent blocks of the same K within one worker) pay only the
   // warm Create cost. Keeping the cache per-worker means no shared
   // mutable state between threads on the encode hot path.
+  auto& loader = FecLoader::instance();
   EncSlot* slot_ptr = nullptr;
   for (auto& slot : w.enc_slots) {
-    if (slot.enc.has_value() && slot.K == nsymbs) {
+    if (slot.enc != nullptr && slot.K == nsymbs) {
       slot_ptr = &slot;
       break;
     }
   }
   if (slot_ptr == nullptr) {
     for (auto& slot : w.enc_slots) {
-      if (!slot.enc.has_value()) {
-        bitstem::fec::EncoderParams params;
+      if (slot.enc == nullptr) {
+        bitstem_fec_params_t params{};
         params.K      = static_cast<std::uint16_t>(nsymbs);
         params.T      = static_cast<std::uint16_t>(T);
         params.scheme = _bitstem_scheme;
         params.Al     = static_cast<std::uint8_t>(Al);
         params.N      = static_cast<std::uint16_t>(N);
-        params.layout = bitstem::fec::LayoutHint::kSourceOrder;
-        auto enc = bitstem::fec::fast::Encoder::Create(params);
-        if (!enc.has_value()) {
+        params.layout = BITSTEM_FEC_LAYOUT_SOURCE_ORDER;
+        bitstem_fec_encoder_t* raw = loader.encoder_create(&params);
+        if (raw == nullptr) {
           throw std::runtime_error("Error creating FEC encoder");
         }
         slot.K   = static_cast<std::uint16_t>(nsymbs);
-        slot.enc = std::move(*enc);
+        slot.enc = EncoderHandle(raw);
         slot_ptr = &slot;
         break;
       }
@@ -827,17 +875,17 @@ void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
           "RaptorFEC: more than 2 distinct K values requested for one file");
     }
   }
-  auto& enc = *slot_ptr->enc;
-  enc.Reset(std::span<const std::byte>(
-      reinterpret_cast<const std::byte*>(w.scratch.data()),
-      padded_size));
+  bitstem_fec_encoder_t* enc = slot_ptr->enc.get();
+  loader.encoder_reset(
+      enc,
+      reinterpret_cast<const std::uint8_t*>(w.scratch.data()),
+      padded_size);
 
   for (unsigned int esi = 0; esi < symbols_to_emit; ++esi) {
     char* slot = w.scratch.data() + esi * T;
     if (esi >= nsymbs) {
-      enc.EncodeSymbol(esi,
-                        std::span<std::byte>(
-                            reinterpret_cast<std::byte*>(slot), T));
+      loader.encoder_encode_symbol(
+          enc, esi, reinterpret_cast<std::uint8_t*>(slot), T);
     }
     srcblk.symbols[esi].data     = slot;
     srcblk.symbols[esi].length   = T;

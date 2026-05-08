@@ -296,15 +296,26 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
     switch (encoding_id){
 #ifdef RAPTOR_ENABLED
       case (int) FecScheme::Raptor:
-        fec_transformer = std::make_shared<RaptorFEC>(
-            FecScheme::Raptor, fec_dec_worker_threads);
-        spdlog::debug("Received FDT entry for an R10 (Raptor) encoded file");
+      case (int) FecScheme::RaptorQ: {
+        // RaptorFEC ctor throws std::runtime_error when libfec.so.0
+        // isn't dlopen-able or doesn't expose the requested scheme.
+        // Catch + log; the file entry is then dropped from the FDT
+        // (fec_transformer stays null below). CompactNoCode files
+        // in the same FDT keep working.
+        const auto scheme = (encoding_id == (int) FecScheme::Raptor)
+                              ? FecScheme::Raptor
+                              : FecScheme::RaptorQ;
+        try {
+          fec_transformer = std::make_shared<RaptorFEC>(
+              scheme, fec_dec_worker_threads);
+          spdlog::debug("Received FDT entry for a {} encoded file",
+                        scheme == FecScheme::Raptor ? "R10 (Raptor)" : "RaptorQ");
+        } catch (const std::exception& e) {
+          spdlog::warn("Skipping FDT entry — FEC unavailable: {}", e.what());
+          continue;  // skip this <File> element entirely
+        }
         break;
-      case (int) FecScheme::RaptorQ:
-        fec_transformer = std::make_shared<RaptorFEC>(
-            FecScheme::RaptorQ, fec_dec_worker_threads);
-        spdlog::debug("Received FDT entry for a RaptorQ encoded file");
-        break;
+      }
 #endif
       default:
         break;

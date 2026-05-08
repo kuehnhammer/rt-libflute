@@ -26,20 +26,49 @@
 #include <thread>
 #include <vector>
 
+#include "fec/FecLoader.h"
 #include "fec/FecTransformer.h"
 #include "flute_types.h"
 
-#include "bitstem/fec/fec.hpp"
+#include "bitstem/fec/fec_c.h"
 
 namespace tinyxml2 { class XMLElement; }
 
 namespace LibFlute {
-  // Glue between LibFlute's FEC abstraction and the bitstem::fec::fast
-  // Encoder / Decoder (currently in R10 mode; RaptorQ lands as a
-  // sibling RaptorQFEC class wired against the same lib via
-  // Scheme::kRaptorQ). One Decoder is constructed per source block on
-  // first received symbol and reused across all subsequent
-  // process_symbol() calls for that block.
+  // Glue between LibFlute's FEC abstraction and the bitstem-fec C ABI
+  // surface (libfec.so.0, accessed via FecLoader's dlopen + dlsym).
+  // libflute has NO link-time dependency on libfec.so — production
+  // builds without an FEC license drop the .so and the loader's
+  // available()/has_scheme() probes route Raptor / RaptorQ files
+  // through a clean "FEC unavailable" path.
+  //
+  // One Decoder is constructed per source block on first received
+  // symbol and reused across all subsequent process_symbol() calls
+  // for that block; one Encoder per K is cached across blocks of
+  // the same K (RFC 5053 §4.4.1.2 bounds files to ≤ 2 distinct K
+  // values, so a 2-slot cache suffices).
+  //
+  // Custom deleters route through FecLoader's destroy function
+  // pointers — required because the handles are opaque C types and
+  // unique_ptr's default deleter (std::default_delete) would call
+  // delete on an incomplete type.
+  struct EncoderDeleter {
+    void operator()(bitstem_fec_encoder_t* e) const noexcept {
+      if (e != nullptr) {
+        FecLoader::instance().encoder_destroy(e);
+      }
+    }
+  };
+  struct DecoderDeleter {
+    void operator()(bitstem_fec_decoder_t* d) const noexcept {
+      if (d != nullptr) {
+        FecLoader::instance().decoder_destroy(d);
+      }
+    }
+  };
+  using EncoderHandle = std::unique_ptr<bitstem_fec_encoder_t, EncoderDeleter>;
+  using DecoderHandle = std::unique_ptr<bitstem_fec_decoder_t, DecoderDeleter>;
+
   class RaptorFEC : public FecTransformer {
 
     private:
@@ -66,7 +95,7 @@ namespace LibFlute {
       // set, can't be cached by K alone), so the decoder gets no
       // equivalent benefit.
       struct DecoderCtx {
-        std::optional<bitstem::fec::fast::Decoder> dec;
+        DecoderHandle dec;
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
       };
@@ -110,7 +139,7 @@ namespace LibFlute {
       // 2-slot map is sufficient.
       struct EncSlot {
         std::uint16_t K = 0;
-        std::optional<bitstem::fec::fast::Encoder> enc;
+        EncoderHandle enc;
       };
       std::array<EncSlot, 2> _enc_slots;
       // SBN currently materialised in _enc_scratch, or -1 if scratch
@@ -194,10 +223,10 @@ namespace LibFlute {
       // loss to begin with.
       float surplus_packet_ratio = 1.15f;
 
-      // FEC scheme picked at construction. Maps to bitstem::fec::Scheme
-      // for Encoder / Decoder Create calls. Default kR10 keeps the
+      // FEC scheme picked at construction. Maps to bitstem_fec_scheme_t
+      // for Encoder / Decoder Create calls. Default R10 keeps the
       // pre-multi-scheme call shape for the receive-side empty ctor.
-      bitstem::fec::Scheme _bitstem_scheme = bitstem::fec::Scheme::kR10;
+      bitstem_fec_scheme_t _bitstem_scheme = BITSTEM_FEC_SCHEME_R10;
       // Wire-level FEC-Encoding-ID — also recorded so AlcPacket /
       // EncodingSymbol scheme dispatch can reach the right SSI byte
       // layout and FEC-Payload-ID width.

@@ -156,9 +156,19 @@ endif()
 
 # Surface the resolved version + path so the consumer can inject them
 # into compile flags / install rules without re-globbing.
+get_filename_component(_BSF_LIB_DIR "${_BSF_SO_PATH}" DIRECTORY)
 set(BITSTEM_FEC_VERSION   "${BSF_VERSION}"     CACHE INTERNAL "")
 set(BITSTEM_FEC_LIBRARY   "${_BSF_SO_PATH}"    CACHE INTERNAL "")
+set(BITSTEM_FEC_LIB_DIR   "${_BSF_LIB_DIR}"    CACHE INTERNAL "")
 set(BITSTEM_FEC_PREFIX    "${_BSF_PREFIX_DIR}" CACHE INTERNAL "")
+
+# Append the codec's lib directory to the build-time RPATH so
+# executables dlopen("libfec.so.0") can resolve the .so during
+# development without LD_LIBRARY_PATH gymnastics. libflute itself
+# has no link-time dependency on libfec.so (the dlopen happens at
+# first FEC use); RPATH on the consuming executable is what dlopen
+# honours, not RPATH on the calling library.
+list(APPEND CMAKE_BUILD_RPATH "${_BSF_LIB_DIR}")
 
 message(STATUS
     "BitstemFEC: ${BSF_VERSION} (${_BSF_PLATFORM}/${BSF_DISTRO}/${_BSF_ARCH}/${BSF_MICROARCH}) "

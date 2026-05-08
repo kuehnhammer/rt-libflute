@@ -45,10 +45,6 @@ find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
 pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
 
-if(LIBFLUTE_BUILD_EXAMPLES)
-  add_subdirectory(examples)
-endif()
-
 include_directories(
     "${PROJECT_BINARY_DIR}"
     ${PROJECT_SOURCE_DIR}/include
@@ -68,9 +64,18 @@ if(ENABLE_RAPTOR)
   # The cmake module below picks the matching tarball, extracts to the
   # build tree, and exposes an imported target `bitstem::fec`. See
   # lib/bitstem-fec/README.md for the version-update workflow.
+  #
+  # Must run before any add_subdirectory() that creates executables —
+  # BitstemFEC.cmake appends to CMAKE_BUILD_RPATH so executables that
+  # dlopen libfec.so.0 can resolve it at runtime via the build's
+  # bitstem-fec lib dir without LD_LIBRARY_PATH gymnastics.
   include(BitstemFEC)
 else()
   message(STATUS "Skipping bitstem-fec integration. To enable Raptor / RaptorQ FEC support build with -DENABLE_RAPTOR=ON")
+endif()
+
+if(LIBFLUTE_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()
 
 # Single library target. Encoder + Decoder are the public surface; the
@@ -99,17 +104,35 @@ if(ENABLE_RAPTOR)
   add_compile_definitions(RAPTOR_ENABLED)
   target_sources(flute
     PRIVATE
+      src/fec/FecLoader.cpp
       src/fec/RaptorFEC.cpp
     PUBLIC
+      include/fec/FecLoader.h
       include/fec/RaptorFEC.h
   )
-  # bitstem::fec is the imported target declared by BitstemFEC.cmake;
-  # IMPORTED_LOCATION points at the extracted libfec.so and
-  # INTERFACE_INCLUDE_DIRECTORIES exposes <bitstem/fec/fec.hpp> on the
-  # consumer's include path. Dynamic-link only — keeps libflute's
-  # closed-source consumers (5gbc-rx) LGPL-clean per the rq-branch
-  # integration plan.
-  target_link_libraries(flute LINK_PUBLIC bitstem::fec)
+  # libfec.so is loaded at runtime via dlopen — libflute has NO link-
+  # time dependency on it. Production builds without an FEC license
+  # ship without the .so; the loader's available()/has_scheme() probes
+  # route Raptor / RaptorQ files through a clean "FEC unavailable"
+  # path while CompactNoCode delivery keeps working unchanged.
+  #
+  # Headers (<bitstem/fec/fec_c.h>, <bitstem/fec/config.h>) come from
+  # the imported target's INTERFACE_INCLUDE_DIRECTORIES so we can
+  # build against the C ABI signatures without taking the .so as a
+  # NEEDED entry. CMAKE_DL_LIBS is `-ldl` on Linux (FreeBSD), empty
+  # on macOS / Windows where dlopen is in libc / kernel32.
+  # PUBLIC propagation: consumers of libflute that #include
+  # <fec/RaptorFEC.h> transitively get <bitstem/fec/fec_c.h> on
+  # their include path. No link-time effect — fec_c.h is a forward-
+  # declaration / function-pointer-typedef header only.
+  target_include_directories(flute PUBLIC
+    $<TARGET_PROPERTY:bitstem::fec,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(flute LINK_PRIVATE ${CMAKE_DL_LIBS})
+
+  # Examples / tests / bench need libfec.so on the runtime search
+  # path so the dlopen succeeds during development; expose the
+  # extracted lib directory via BSF_LIB_DIR (set by BitstemFEC.cmake).
+  # Production deployments arrange this through their own packaging.
 endif()
 
 target_link_libraries(flute
