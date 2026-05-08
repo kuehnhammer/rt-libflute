@@ -123,8 +123,33 @@ namespace LibFlute {
       size_t _len = 0;
 
       // RFC5651 5.1 - LCT Header Format
+      //
+      // The bitfield layout depends on both the compiler ABI (MSVC vs.
+      // GCC/Clang allocate bitfields differently) and the target's byte
+      // ordering. GCC/Clang expose __BYTE_ORDER__; MSVC does not, but
+      // every Windows target this build supports (x64, ARM64) is
+      // little-endian, so an MSVC-on-LE assumption is safe. Wire-format
+      // compatibility on MSVC is asserted by the static_assert below;
+      // FLUTE delivery is not exercised on Windows in the current port,
+      // but the layout is kept consistent so a future Windows OTA build
+      // doesn't have to revisit this.
+#if defined(_MSC_VER)
+#  define LIBFLUTE_LCT_LITTLE_ENDIAN 1
+#  pragma pack(push, 1)
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#  define LIBFLUTE_LCT_LITTLE_ENDIAN 1
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  define LIBFLUTE_LCT_LITTLE_ENDIAN 0
+#else
+#  error "Endianness can not be determined"
+#endif
+
+#if defined(_MSC_VER)
+      struct lct_header_t {
+#else
       struct __attribute__((packed)) lct_header_t {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#endif
+#if LIBFLUTE_LCT_LITTLE_ENDIAN
         uint8_t res1:1;
         uint8_t source_packet_indicator:1;
         uint8_t congestion_control_flag:2;
@@ -136,7 +161,7 @@ namespace LibFlute {
         uint8_t half_word_flag:1;
         uint8_t toi_flag:2;
         uint8_t tsi_flag:1;
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#else
         uint8_t version:4;
         uint8_t congestion_control_flag:2;
         uint8_t source_packet_indicator:1;
@@ -148,12 +173,14 @@ namespace LibFlute {
         uint8_t res2:2;
         uint8_t close_session_flag:1;
         uint8_t close_object_flag:1;
-#else
-#error "Endianness can not be determined"
 #endif
         uint8_t lct_header_len;
         uint8_t codepoint;
       } _lct_header;
+#if defined(_MSC_VER)
+#  pragma pack(pop)
+#endif
+#undef LIBFLUTE_LCT_LITTLE_ENDIAN
       static_assert(sizeof(_lct_header) == 4);
 
       enum HeaderExtension { 

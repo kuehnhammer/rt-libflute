@@ -14,13 +14,34 @@
 // under the License.
 //
 #include "File.h"
-#include <openssl/evp.h>         // for EVP_DigestFinal_ex, EVP_DigestInit_ex
-#include <openssl/md5.h>         // for MD5_DIGEST_LENGTH
-#include <openssl/types.h>       // for EVP_MD, EVP_MD_CTX
+#if defined(_WIN32)
+// Windows: replace OpenSSL with the SDK-provided BCrypt MD5 — no
+// external library dependency. Both BCRYPT_MD5_ALGORITHM and the
+// MD5 digest length are stable since Windows Vista.
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <bcrypt.h>
+namespace {
+inline constexpr unsigned int kMd5DigestLength = 16;
+inline constexpr unsigned int kMaxDigestSize   = 64;  // mirrors OpenSSL EVP_MAX_MD_SIZE
+}  // namespace
+#  define MD5_DIGEST_LENGTH static_cast<unsigned long>(::kMd5DigestLength)
+#  define EVP_MAX_MD_SIZE   ::kMaxDigestSize
+#else
+#  include <openssl/evp.h>         // for EVP_DigestFinal_ex, EVP_DigestInit_ex
+#  include <openssl/md5.h>         // for MD5_DIGEST_LENGTH
+#  include <openssl/types.h>       // for EVP_MD, EVP_MD_CTX
+#endif
 #include <cstdio>               // for snprintf
 #include <cstdlib>              // for malloc, free
 #include <ctime>                // for time
 #include <algorithm>             // for all_of, min, max
+#include <array>                 // for std::array (MD5 digest buffer)
 #include <cassert>               // for assert
 #include <cmath>                 // for ceil, floor
 #include <cstdint>               // for uint16_t
@@ -417,13 +438,33 @@ auto LibFlute::File::mark_completed(const std::vector<EncodingSymbol>& symbols, 
 
 auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) -> int
 {
-  // simple implementation based on openssl docs (https://www.openssl.org/docs/man3.0/man3/EVP_DigestInit_ex.html)
   if (input == nullptr || length == 0U) {
     spdlog::error("MD5 called with invalid input");
     return -1;
   }
   spdlog::debug("MD5 calculation called for input length {}", length);
 
+#if defined(_WIN32)
+  // Windows: BCrypt provides MD5 via the SDK; no OpenSSL needed.
+  BCRYPT_ALG_HANDLE alg = nullptr;
+  if (!BCRYPT_SUCCESS(::BCryptOpenAlgorithmProvider(
+          &alg, BCRYPT_MD5_ALGORITHM, nullptr, 0))) {
+    spdlog::error("BCryptOpenAlgorithmProvider(MD5) failed");
+    return -1;
+  }
+  unsigned int md_len = kMd5DigestLength;
+  if (!BCRYPT_SUCCESS(::BCryptHash(
+          alg, nullptr, 0,
+          reinterpret_cast<PUCHAR>(input),
+          static_cast<ULONG>(length),
+          result, md_len))) {
+    spdlog::error("BCryptHash(MD5) failed");
+    ::BCryptCloseAlgorithmProvider(alg, 0);
+    return -1;
+  }
+  ::BCryptCloseAlgorithmProvider(alg, 0);
+#else
+  // simple implementation based on openssl docs (https://www.openssl.org/docs/man3.0/man3/EVP_DigestInit_ex.html)
   EVP_MD_CTX*   context = EVP_MD_CTX_new();
   const EVP_MD* md = EVP_md5();
   unsigned int  md_len;
@@ -432,6 +473,7 @@ auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) 
   EVP_DigestUpdate(context, input, length);
   EVP_DigestFinal_ex(context, result, &md_len);
   EVP_MD_CTX_free(context);
+#endif
 
   char buf [EVP_MAX_MD_SIZE * 2 + 1] = {}; //NOLINT
   for (auto i = 0UL; i < md_len; i++){

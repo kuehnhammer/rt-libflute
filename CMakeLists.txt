@@ -8,23 +8,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
 
-set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
-set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
-set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
-set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
-set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
-
-# Apply the warning discipline to libflute's own targets directly.
-# CMAKE_*_FLAGS_*_INIT only seeds the cache on first configure; an
-# integrator embedding libflute via add_subdirectory() may have their
-# own flags. target_compile_options below pins the lib's source to
-# the project's mandated discipline regardless of how it's consumed.
-set(LIBFLUTE_WARNING_FLAGS
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Werror)
+if(MSVC)
+  # _INIT vars only seed the cache on the first configure run; the
+  # target-level flags below are what actually pin the discipline.
+  # /WX is left off here for the same reason it's off in the parent
+  # project on MSVC — see notes in libs/5gbc-rx/CMakeLists.txt.
+  set(CMAKE_CXX_FLAGS_DEBUG_INIT "/W4")
+  set(CMAKE_C_FLAGS_DEBUG_INIT "/W4")
+  set(CMAKE_CXX_FLAGS_RELEASE_INIT "/W4 /O2")
+  set(CMAKE_C_FLAGS_RELEASE_INIT "/W4 /O2")
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "/W4 /O2 /Zi")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "/W4 /O2 /Zi")
+  set(LIBFLUTE_WARNING_FLAGS /W4 /permissive-
+      # tinyxml2 / spdlog headers and libflute source itself trigger
+      # these on MSVC without indicating real bugs.
+      /wd4244 /wd4267 /wd4324 /wd4458 /wd4505 /wd4127)
+else()
+  set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
+  set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -Wextra -Wpedantic -Werror")
+  set(CMAKE_CXX_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
+  set(CMAKE_C_FLAGS_RELEASE_INIT "-Wall -Wextra -Wpedantic -Werror -O3")
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-Wall -Wextra -Wpedantic -Werror -O2 -g")
+  set(LIBFLUTE_WARNING_FLAGS -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -41,9 +48,21 @@ option(LIBFLUTE_BUILD_BENCH    "Build end-to-end round-trip benchmark (transient
 option(ENABLE_RAPTOR           "Enable support for Raptor FEC" OFF)
 
 find_package(spdlog REQUIRED)
-find_package(PkgConfig REQUIRED)
-find_package(OpenSSL REQUIRED)
-pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
+# OpenSSL provides EVP MD5 in src/File.cpp on POSIX. On Windows we use
+# the SDK-provided BCrypt API instead — see the _WIN32 branch in
+# File.cpp — so the OpenSSL dependency is dropped there.
+if(NOT WIN32)
+  find_package(OpenSSL REQUIRED)
+endif()
+# tinyxml2: pkg-config on Linux/macOS where the existing flow works.
+# Windows uses find_package against the FetchContent override at the
+# parent scope (no pkg-config in the VS toolchain).
+if(WIN32)
+  find_package(tinyxml2 REQUIRED)
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(TINYXML REQUIRED IMPORTED_TARGET tinyxml2)
+endif()
 
 include_directories(
     "${PROJECT_BINARY_DIR}"
@@ -135,13 +154,20 @@ if(ENABLE_RAPTOR)
   # Production deployments arrange this through their own packaging.
 endif()
 
-target_link_libraries(flute
-    LINK_PUBLIC
-    spdlog::spdlog
+target_link_libraries(flute LINK_PUBLIC spdlog::spdlog)
+
+if(WIN32)
+  # Windows: BCrypt replaces OpenSSL/MD5 in File.cpp; pthread isn't
+  # needed (std::thread maps to native threads via the MSVC runtime).
+  # tinyxml2 comes from the parent FetchContent override.
+  target_link_libraries(flute LINK_PUBLIC tinyxml2::tinyxml2 bcrypt)
+else()
+  target_link_libraries(flute LINK_PUBLIC
     pthread
     OpenSSL::Crypto
     PkgConfig::TINYXML
-)
+  )
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests. Disabled when libflute is consumed via add_subdirectory() unless

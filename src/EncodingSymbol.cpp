@@ -15,7 +15,17 @@
 //
 
 #include "EncodingSymbol.h"
-#include <netinet/in.h>     // for htons, ntohs
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <winsock2.h>    // for htons, ntohs (no WSAStartup needed)
+#else
+#  include <netinet/in.h>  // for htons, ntohs
+#endif
 #include <algorithm>        // for min
 #include <cmath>            // for ceil
 #include <cstring>          // for memcpy
