@@ -16,6 +16,8 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <cstddef>
+#include <span>
 #include <vector>
 #include "flute_types.h"
 
@@ -80,6 +82,15 @@ namespace LibFlute {
       *  Get the data length
       */
       size_t len() const { return _data_len; };
+
+     /**
+      *  Raw wire bytes of this encoding symbol. Span lifetime is
+      *  tied to the underlying packet buffer; safe to use during
+      *  the put_symbol() call chain, NOT to retain afterward.
+      */
+      std::span<const std::byte> bytes() const {
+        return {reinterpret_cast<const std::byte*>(_encoded_data), _data_len};
+      }
 
     private:
       uint32_t _id = 0;

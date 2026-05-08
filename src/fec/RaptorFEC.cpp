@@ -287,26 +287,38 @@ void *LibFlute::RaptorFEC::allocate_file_buffer(int min_length) {
   return malloc(Z * target_K(0) * T);
 }
 
+// Lazily construct one Decoder per SBN, bound at construction to
+// the K·T slice of File::_buffer at block_byte_offset(sbn). The
+// codec's lent-buffer Decoder writes received + reconstructed
+// source bytes directly into that span — no per-block extract
+// memcpy is needed.
 LibFlute::RaptorFEC::DecoderCtx&
 LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
+  if (_dec_file_buffer == nullptr) {
+    throw std::runtime_error(
+        "RaptorFEC::ensure_dec_ctx called before create_blocks");
+  }
   auto it = _dec_ctxs.find(sbn);
   if (it != _dec_ctxs.end()) {
     return it->second;
   }
 
-  // Construct a fresh decoder for this source block. Per RFC 5053
-  // §4.4.1.2, blocks 0..ZL-1 have KL source symbols and blocks
-  // ZL..Z-1 have KS = KL or KL-1. Only the very last block of the
-  // entire object may have a partial last source symbol when F isn't
-  // a clean multiple of T.
-  const unsigned int nsymbs = block_K(sbn);
-  const unsigned long byte_off = block_byte_offset(sbn);
-  unsigned long blocksize = static_cast<unsigned long>(nsymbs) * T;
+  const unsigned int   nsymbs   = block_K(sbn);
+  const unsigned long  byte_off = block_byte_offset(sbn);
+  unsigned long        blocksize = static_cast<unsigned long>(nsymbs) * T;
   if (byte_off + blocksize > F) {
     blocksize = F - byte_off;
   }
 
-  spdlog::debug("Constructing r10 decoder for SBN {}: K={} blocksize={}",
+  // Lent-buffer span: K·T bytes. The file buffer is over-allocated
+  // to Z·KL·target_K-overhead·T (see allocate_file_buffer) so the
+  // K·T slice always lies within it, even for the trailing block
+  // when F % T != 0.
+  const std::span<std::byte> span(
+      reinterpret_cast<std::byte*>(_dec_file_buffer + byte_off),
+      static_cast<std::size_t>(nsymbs) * T);
+
+  spdlog::debug("Constructing FEC decoder for SBN {}: K={} blocksize={} (lent buffer)",
                 sbn, nsymbs, blocksize);
 
   // Mirrors the encode-side EncoderParams plumbing: scheme + Al + N
@@ -319,46 +331,45 @@ LibFlute::RaptorFEC::ensure_dec_ctx(std::uint16_t sbn) {
   params.scheme = _bitstem_scheme;
   params.Al     = static_cast<std::uint8_t>(Al);
   params.N      = static_cast<std::uint16_t>(N);
-  auto dec = bitstem::fec::fast::Decoder::Create(params);
+  // Source-order layout: tells the codec our lent buffer (= File::-
+  // _buffer slice) is laid out as K source symbols × T bytes
+  // contiguous, matching the file's natural byte order. At N>1 the
+  // codec wrapper de-interleaves into its inner sub-block-major
+  // working buffer on TryDecode and back out into the lent buffer
+  // on completion — without this hint, a wire-cberner-compatible
+  // sender's bytes land sub-block-major in File::_buffer and the
+  // receiver's file content diverges.
+  params.layout = bitstem::fec::LayoutHint::kSourceOrder;
+  auto dec = bitstem::fec::fast::Decoder::Create(params, span);
   if (!dec.has_value()) {
-    spdlog::error("bitstem::fec::Decoder::Create failed for SBN {} K={} scheme={} Al={} N={}",
+    spdlog::error("bitstem::fec::Decoder::Create(span) failed for SBN {} K={} scheme={} Al={} N={}",
                   sbn, nsymbs, static_cast<int>(_bitstem_scheme),
                   params.Al, params.N);
     throw std::runtime_error("FEC decoder construction failed");
   }
 
   DecoderCtx ctx;
-  ctx.dec = std::move(dec);
-  ctx.K = static_cast<std::uint16_t>(nsymbs);
-  ctx.block_size = blocksize;
+  ctx.dec        = std::move(dec);
+  ctx.K          = static_cast<std::uint16_t>(nsymbs);
+  ctx.block_size = static_cast<std::uint32_t>(blocksize);
   auto [iter, _inserted] = _dec_ctxs.emplace(sbn, std::move(ctx));
   return iter->second;
 }
 
 bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
-                                          LibFlute::Symbol& symbol,
-                                          unsigned int id) {
-  assert(symbol.length == T);
+                                          unsigned int id,
+                                          std::span<const std::byte> bytes) {
+  assert(bytes.size() == T);
   DecoderCtx& ctx = ensure_dec_ctx(static_cast<std::uint16_t>(srcblk.id));
-  if (ctx.decoded) {
-    // Block already decoded (almost always via the K+1 opportunistic
-    // path in check_source_block_completion). Subsequent symbols are
-    // expected redundancy from the encoder's repair overhead — drop
-    // them silently. Used to be spdlog::warn here, which was free
-    // pre-R10 (block decoded only at FDT end-of-transmission, never
-    // mid-stream) but is hot now: ~0.15·K symbols per block fire it
-    // after early decode lands.
+  if (ctx.dec->IsDecoded()) {
+    // Block already decoded (almost always via the codec's lossless
+    // auto-finalise on the K-th source ESI). Subsequent repair-
+    // symbol packets carry redundancy we no longer need.
     spdlog::trace("Skipped symbol after early decode: SBN {}, ESI {}",
                   srcblk.id, id);
     return true;
   }
-  ctx.dec->AddReceivedSymbol(
-      id,
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte*>(symbol.data), symbol.length));
-  if (id < ctx.K) {
-    ++ctx.source_esi_count;
-  }
+  ctx.dec->AddReceivedSymbol(id, bytes);
   return true;
 }
 
@@ -402,15 +413,11 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
     return complete;
   }
 
-  // Decoder side. Per-symbol completion-check is cheap by design.
-  // We fire TryDecode exactly once per block, at the precise moment
-  // the lossless short-circuit becomes applicable: every source ESI
-  // (id < K) for this block has arrived. At that point Decoder::-
-  // TryDecode's lossless short-circuit permutes the receive buffer
-  // by ESI in ~1 ms — no matrix work, no allocation pressure that
-  // competes with concurrent encoder packet emission. The block is
-  // then released for the rest of its repair-symbol stream to be
-  // ignored at put_symbol's block.complete early-return.
+  // Decoder side. With bitstem-fec ≥ 0.12.1 the codec's
+  // AddReceivedSymbol auto-finalises on the K-th source ESI:
+  // IsDecoded() flips, the lent buffer (= File::_buffer slice)
+  // already holds the K source symbols. No mid-stream TryDecode
+  // call is needed for the lossless path.
   //
   // The expensive lossy path (≥1 source ESI lost ⇒ matrix factor
   // ~58 ms at K=8000) is intentionally NOT triggered here. Mid-
@@ -422,28 +429,7 @@ bool LibFlute::RaptorFEC::check_source_block_completion(LibFlute::SourceBlock& s
   // undecoded blocks at the natural batch boundary.
   auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
   if (it == _dec_ctxs.end()) return false;
-  DecoderCtx& ctx = it->second;
-  if (ctx.decoded) return true;
-
-  if (!ctx.attempted_lossless_kp1 &&
-      ctx.source_esi_count == ctx.K) {
-    ctx.attempted_lossless_kp1 = true;
-    // Skip the bitstem-r10 lossless short-circuit entirely. Every
-    // source ESI for this block has arrived, and File::put_symbol
-    // wrote each one's bytes to file_buffer[block_offset + esi*T]
-    // via Symbol::data — so the file buffer ALREADY holds the
-    // correct K source symbols for this block. Calling TryDecode
-    // would only round-trip the bytes through the Decoder's
-    // _source_block (alloc K*T per block + permute by ESI + later
-    // extract_finished_block memcpy back to the file buffer) for
-    // a net no-op modulo K*T·4 of redundant copies and ~50 fresh
-    // K*T allocations per file. Just mark the block decoded and
-    // flag the extract path to skip the memcpy.
-    ctx.decoded                       = true;
-    ctx.skipped_via_lossless_libflute = true;
-    return true;
-  }
-  return false;
+  return it->second.dec.has_value() && it->second.dec->IsDecoded();
 }
 
 bool LibFlute::RaptorFEC::try_decode_pending(
@@ -455,11 +441,10 @@ bool LibFlute::RaptorFEC::try_decode_pending(
     auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
     if (it == _dec_ctxs.end()) continue;        // no symbols received
     DecoderCtx& ctx = it->second;
-    if (ctx.decoded) continue;                   // already done
+    if (ctx.dec->IsDecoded()) continue;          // already done
     if (ctx.dec->TryDecode()) {
-      ctx.decoded   = true;
       srcblk.complete = true;
-      any_decoded   = true;
+      any_decoded     = true;
       spdlog::debug("Raptor: decoded source block {} on end-of-transmission trigger",
                     srcblk.id);
     } else {
@@ -470,48 +455,10 @@ bool LibFlute::RaptorFEC::try_decode_pending(
   return any_decoded;
 }
 
-void LibFlute::RaptorFEC::extract_finished_block(LibFlute::SourceBlock& srcblk,
-                                                  DecoderCtx& ctx) {
-  if (!ctx.decoded) {
-    spdlog::warn("extract_finished_block called on non-decoded SBN {}", srcblk.id);
-    return;
-  }
-  if (ctx.skipped_via_lossless_libflute) {
-    // File buffer already holds the correct source bytes — every
-    // received source ESI's put_symbol wrote them straight to the
-    // file buffer via Symbol::data. Nothing to extract.
-    return;
-  }
-  // The new r10 API hands us the recovered K source bytes as one
-  // contiguous span. The OLD glue iterated `dc->pp[esi]` and copied
-  // each intermediate symbol back into a per-symbol buffer that
-  // happened to alias the file buffer; we just memcpy the source
-  // span directly into the file buffer at this block's offset.
-  //
-  // The per-symbol data pointers in srcblk.symbols still point into
-  // the file buffer at the right offsets (set up by create_blocks on
-  // the receive path), so an alternative would be a per-symbol
-  // memcpy. But a single block-level memcpy is simpler and equivalent
-  // in result.
-  if (srcblk.symbols.empty()) {
-    return;
-  }
-  // First symbol's data pointer is the start of the block in the
-  // file buffer (create_blocks lays out symbols at
-  // block_byte_offset(sbn) + i*T).
-  std::byte* dst = reinterpret_cast<std::byte*>(srcblk.symbols.front().data);
-  const auto src = ctx.dec->SourceBlock();
-  std::memcpy(dst, src.data(), ctx.block_size);
-  spdlog::debug("Raptor Decoder: extracted decoded source block {} ({} bytes)",
-                srcblk.id, ctx.block_size);
-}
-
-bool LibFlute::RaptorFEC::extract_file(std::vector<SourceBlock>& blocks) {
-  for (auto& srcblk : blocks) {
-    auto it = _dec_ctxs.find(static_cast<std::uint16_t>(srcblk.id));
-    if (it == _dec_ctxs.end()) continue;
-    extract_finished_block(srcblk, it->second);
-  }
+bool LibFlute::RaptorFEC::extract_file(std::vector<SourceBlock>& /*blocks*/) {
+  // Lent-buffer Decoder writes recovered source bytes straight into
+  // File::_buffer during AddReceivedSymbol / TryDecode. Nothing to
+  // extract here — the file's source bytes are already in place.
   return true;
 }
 
@@ -599,6 +546,11 @@ void LibFlute::RaptorFEC::fill_block_into_scratch(LibFlute::SourceBlock& srcblk)
         params.scheme = _bitstem_scheme;
         params.Al     = static_cast<std::uint8_t>(Al);
         params.N      = static_cast<std::uint16_t>(N);
+        // Source-order layout: _enc_scratch holds the file slice
+        // verbatim (memcpy from _enc_src_buffer), source-order. At
+        // N>1 this lets the codec skip its internal transpose into
+        // sub-block-major and feed the inner codec directly.
+        params.layout = bitstem::fec::LayoutHint::kSourceOrder;
         auto enc = bitstem::fec::fast::Encoder::Create(params);
         if (!enc.has_value()) {
           spdlog::error("bitstem::fec::Encoder::Create failed for SBN {} K={} scheme={} Al={} N={}",
@@ -791,6 +743,7 @@ void LibFlute::RaptorFEC::fill_block_into_worker_scratch(
         params.scheme = _bitstem_scheme;
         params.Al     = static_cast<std::uint8_t>(Al);
         params.N      = static_cast<std::uint16_t>(N);
+        params.layout = bitstem::fec::LayoutHint::kSourceOrder;
         auto enc = bitstem::fec::fast::Encoder::Create(params);
         if (!enc.has_value()) {
           throw std::runtime_error("Error creating FEC encoder");
@@ -861,8 +814,11 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
     return block_vec;
   }
 
-  // Decoder side: Symbol::data points directly into the receiver's
-  // file buffer (one slot per ESI).
+  // Decoder side: capture the file buffer pointer so the lent-buffer
+  // Decoder API can derive K·T-byte spans per source block (one
+  // Decoder lazy-constructed per SBN in ensure_dec_ctx).
+  _dec_file_buffer = buffer;
+  _dec_ctxs.clear();
   for (unsigned int sbn = 0; sbn < Z; ++sbn) {
     auto& block = block_vec[sbn];
     block.id = sbn;
@@ -871,6 +827,10 @@ LibFlute::RaptorFEC::create_blocks(char *buffer, int *bytes_read) {
     block.symbols.reserve(symbols_to_read);
     for (unsigned int i = 0; i < symbols_to_read; ++i) {
       LibFlute::Symbol sym{};
+      // Symbol::data still points into the file buffer for diagnostic
+      // / future use, but the lent-buffer Decoder no longer needs it
+      // — AddReceivedSymbol writes via the K·T span captured in
+      // ensure_dec_ctx.
       sym.data     = buffer + blk_off + static_cast<unsigned long>(i) * T;
       sym.length   = T;
       block.symbols.push_back(sym);

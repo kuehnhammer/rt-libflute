@@ -18,6 +18,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <cstddef>
+#include <span>
 #include <vector>
 #include "tinyxml2.h"
 #include "flute_types.h"
@@ -54,14 +56,22 @@ namespace LibFlute {
     virtual std::vector<SourceBlock> create_blocks(char *buffer, int *bytes_read) = 0;
 
     /**
-     * @brief Process a received symbol
+     * @brief Process a received symbol.
      *
-     * @param srcblk the source block this symbols corresponds to
-     * @param symb the received symbol
-     * @param id the symbols id
+     * @param srcblk the source block this symbol corresponds to
+     * @param id     the symbol's encoding-symbol ID
+     * @param bytes  raw wire bytes of the symbol; valid for the
+     *               duration of the call only. For FEC schemes
+     *               with a lent-buffer Decoder (RaptorFEC), these
+     *               are the bytes the codec writes into the file
+     *               buffer slot via AddReceivedSymbol — replacing
+     *               File::put_symbol's own decode_to() copy when
+     *               writes_symbol_bytes_directly() returns true.
      * @return success or failure
      */
-    virtual bool process_symbol(LibFlute::SourceBlock& srcblk, LibFlute::Symbol& symb, unsigned int id) = 0;
+    virtual bool process_symbol(LibFlute::SourceBlock& srcblk,
+                                 unsigned int id,
+                                 std::span<const std::byte> bytes) = 0;
 
     virtual bool calculate_partitioning() = 0;
 
@@ -124,6 +134,22 @@ namespace LibFlute {
      *        O(Z × K × T)) and runs EncodeSymbol for the repair ESIs.
      */
     virtual void prepare_for_emit(SourceBlock& /*srcblk*/) {}
+
+    /**
+     * @brief Receive-side hook: does this transformer write source-symbol
+     *        bytes directly into the file buffer (via the codec's lent-
+     *        buffer Decoder API), bypassing File::put_symbol's
+     *        decode_to() copy?
+     *
+     *        Default false: callers like CompactNoCode that don't have
+     *        a codec layer rely on File::put_symbol's decode_to() to
+     *        place the symbol bytes into the file buffer slot. RaptorFEC
+     *        with the new lent-buffer Decoder writes the bytes inside
+     *        process_symbol() → AddReceivedSymbol(); doing decode_to()
+     *        first would be a redundant memcpy at the cost of cache
+     *        contention with the codec's write of the same address.
+     */
+    virtual bool writes_symbol_bytes_directly() const { return false; }
 
     uint32_t nof_source_symbols = 0;
     uint32_t nof_source_blocks = 0;

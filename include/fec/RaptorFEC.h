@@ -48,43 +48,37 @@ namespace LibFlute {
 
       unsigned int target_K(int blockno);
 
-      // Per-block context. The encoder and decoder are mutually
-      // exclusive at run time (a RaptorFEC instance is constructed
-      // either as part of a Transmitter -> encoder, or by FDT parsing
-      // on the receive side -> decoder), so they share storage as an
-      // optional + a map respectively.
+      // Per-source-block decoder context. The codec's lent-buffer
+      // Decoder is constructed once per SBN, bound at construction
+      // to the K·T slice of File::_buffer at block_byte_offset(sbn);
+      // subsequent AddReceivedSymbol / TryDecode calls write bytes
+      // (received and reconstructed) directly into the file buffer.
+      //
+      // Per-SBN ownership is required because ALC packets arrive in
+      // arbitrary SBN order — multiple SBNs accumulate receive state
+      // concurrently and Decoder::Reset(span) clears that state, so
+      // sharing a Decoder across SBNs (even at the same K) isn't
+      // viable on the receive side. The per-instance scratch
+      // (~K·T-class) is unavoidable; the encoder-side per-K pool's
+      // Create-cost amortization comes from a process-wide schedule
+      // cache inside bitstem-fec — that cache is encoder-only (the
+      // per-block schedule on decode depends on the received-ESI
+      // set, can't be cached by K alone), so the decoder gets no
+      // equivalent benefit.
       struct DecoderCtx {
         std::optional<bitstem::fec::fast::Decoder> dec;
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
-        bool decoded = false;           // cached IsDecoded() so we don't re-call TryDecode
-        // True iff the block was completed via the libflute-side
-        // lossless skip path (every source ESI received in its
-        // natural file-buffer slot via Symbol::data ⇒ no bitstem-r10
-        // TryDecode call, no extract_finished_block memcpy needed).
-        // The file buffer already holds the correct source bytes;
-        // extract_finished_block becomes a no-op for this block.
-        bool skipped_via_lossless_libflute = false;
-        // Source ESIs (id < K) received so far for this block.
-        // When this reaches K we know the lossless short-circuit
-        // inside Decoder::TryDecode will fire (every source symbol
-        // arrived intact ⇒ permute by ESI, no matrix work). At that
-        // moment the block can decode for the cost of a K×T memcpy
-        // (~1 ms per block at K=8000, T=1424). For lossy reception
-        // (≥1 source missing) we deliberately defer to the FDT
-        // end-of-transmission try_decode_pending path so the
-        // ~58 ms-per-block matrix factor is batched at the end and
-        // doesn't compete with the encoder's per-packet work mid-
-        // stream. A bench at drop_every=8000 (1 drop/block) shows
-        // mid-stream matrix factoring is a net 13 % regression vs.
-        // batched even though total CPU work is identical.
-        std::uint32_t source_esi_count = 0;
-        bool attempted_lossless_kp1 = false;
       };
 
       // Per-source-block decoder state; survives across process_symbol()
       // calls for the same block.
       std::map<std::uint16_t, DecoderCtx> _dec_ctxs;
+      // Pointer to File::_buffer, captured in create_blocks (decoder
+      // side) — same pattern as _enc_src_buffer on the encoder side.
+      // The lent span passed to Decoder::Create(params, span) is a
+      // K·T slice of this buffer.
+      char* _dec_file_buffer = nullptr;
 
       // Encoder-side single shared symbol scratch. Holds at most
       // max(target_K) × T bytes — one source block's worth, laid out
@@ -179,10 +173,8 @@ namespace LibFlute {
       std::size_t _enc_src_buffer_len = 0;
 
       // Helpers.
-      DecoderCtx& ensure_dec_ctx(std::uint16_t sbn);
       LibFlute::SourceBlock create_block_placeholder(int blockid);
       void                  fill_block_into_scratch(LibFlute::SourceBlock& srcblk);
-      void extract_finished_block(LibFlute::SourceBlock& srcblk, DecoderCtx& ctx);
 
       // Repair-symbol overhead. Default of 1.15× protects against ~15%
       // packet loss. The constructor overrides this from the caller's
@@ -240,11 +232,23 @@ namespace LibFlute {
 
       std::vector<SourceBlock> create_blocks(char *buffer, int *bytes_read) override;
 
-      bool process_symbol(LibFlute::SourceBlock& srcblk, LibFlute::Symbol& symb, unsigned int id) override;
+      bool process_symbol(LibFlute::SourceBlock& srcblk,
+                          unsigned int id,
+                          std::span<const std::byte> bytes) override;
+
+      // Internal helper: lazily construct one Decoder per SBN, bound
+      // to the K·T slice of File::_buffer at block_byte_offset(sbn).
+      // Subsequent calls return the existing context.
+      DecoderCtx& ensure_dec_ctx(std::uint16_t sbn);
 
       bool try_decode_pending(std::vector<LibFlute::SourceBlock>& blocks) override;
 
       void prepare_for_emit(LibFlute::SourceBlock& srcblk) override;
+
+      // Lent-buffer Decoder writes source-symbol bytes directly into
+      // File::_buffer via AddReceivedSymbol — File::put_symbol must
+      // skip its own decode_to() copy.
+      bool writes_symbol_bytes_directly() const override { return true; }
 
       bool calculate_partitioning() override;
 
