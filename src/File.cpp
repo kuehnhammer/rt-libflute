@@ -17,7 +17,7 @@
 #include <openssl/evp.h>         // for EVP_DigestFinal_ex, EVP_DigestInit_ex
 #include <openssl/md5.h>         // for MD5_DIGEST_LENGTH
 #include <openssl/types.h>       // for EVP_MD, EVP_MD_CTX
-#include <cstdio>               // for sprintf
+#include <cstdio>               // for snprintf
 #include <cstdlib>              // for malloc, free
 #include <ctime>                // for time
 #include <algorithm>             // for all_of, min, max
@@ -433,9 +433,9 @@ auto LibFlute::calculate_md5(char *input, size_t length, unsigned char *result) 
   EVP_DigestFinal_ex(context, result, &md_len);
   EVP_MD_CTX_free(context);
 
-  char buf [EVP_MAX_MD_SIZE * 2] = {}; //NOLINT
+  char buf [EVP_MAX_MD_SIZE * 2 + 1] = {}; //NOLINT
   for (auto i = 0UL; i < md_len; i++){
-    sprintf(&buf[i*2], "%02x", result[i]);
+    snprintf(&buf[i*2], sizeof(buf) - i*2, "%02x", result[i]);
   }
   spdlog::debug("MD5 Digest is {}", buf);
 

@@ -139,7 +139,7 @@ target_link_libraries(flute
     LINK_PUBLIC
     spdlog::spdlog
     pthread
-    crypto
+    OpenSSL::Crypto
     PkgConfig::TINYXML
 )
 
