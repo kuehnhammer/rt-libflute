@@ -60,6 +60,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <random>
 #include <span>
 #include <string>
 #include <vector>
@@ -93,6 +94,21 @@ void FillDeterministic(char* p, std::size_t n) {
     }
 }
 
+// Bursty-fade loss model. Mimics the urban-pedestrian destructive-
+// fade pattern (5G-BC FeMBMS): low mobility, infrequent multi-packet
+// fades. Inter-burst spacing is a uniform random jitter around a
+// mean derived from the assumed wire rate (e.g. 20 Mbps, 8 MHz
+// FeMBMS mid-64QAM → ~1667 pkts/sec at mtu=1500, so 200 ms ≈
+// 333 pkts). Each burst drops a random number of consecutive
+// packets in [1, max_burst_pkts]. When mean_interval_pkts == 0 the
+// model is disabled.
+struct BurstLossConfig {
+    unsigned      mean_interval_pkts   = 0;
+    unsigned      interval_jitter_pkts = 0;
+    unsigned      max_burst_pkts       = 1;
+    std::uint32_t seed                 = 0xC0FFEEU;
+};
+
 struct ScenarioResult {
     std::size_t F = 0;
     LibFlute::FecScheme fec = LibFlute::FecScheme::CompactNoCode;
@@ -103,6 +119,8 @@ struct ScenarioResult {
     int drop_every = 0;
     std::size_t dropped_count = 0;
     std::size_t targeted_src_drops = 0;   // count of (sbn, esi) source-ESI drops
+    std::size_t burst_count       = 0;    // burst-loss model: number of bursts
+    BurstLossConfig burst_loss;            // copy for label rendering
     std::optional<unsigned> redundancy_level;
     std::uint64_t sub_block_size_target = 0;
     LibFlute::EncoderStats es{};
@@ -181,6 +199,7 @@ struct ScenarioConfig {
     // RaptorFEC's internal default (16 MB → biased toward N=1).
     std::uint64_t              sub_block_size_target = 0;
     int                        drop_every = 0;
+    BurstLossConfig            burst_loss;
     bool                       no_decode  = false;
 };
 
@@ -203,6 +222,32 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
     std::size_t file_packet_idx = 0;
     std::size_t dropped = 0;
     std::size_t targeted_dropped = 0;
+    std::size_t burst_count = 0;
+
+    // Burst-loss state. Inter-burst gap is a uniform jitter around
+    // the configured mean; burst length is uniform in [1, max].
+    // Deterministic via seeded mt19937 so successive runs of the
+    // same F / mtu / config produce the exact same packet drops.
+    std::mt19937 burst_rng(cfg.burst_loss.seed);
+    auto sample_interval = [&](std::mt19937& g) -> std::size_t {
+        const auto& bl = cfg.burst_loss;
+        if (bl.interval_jitter_pkts == 0u) {
+            return bl.mean_interval_pkts;
+        }
+        const int jit  = static_cast<int>(bl.interval_jitter_pkts);
+        const int mean = static_cast<int>(bl.mean_interval_pkts);
+        std::uniform_int_distribution<int> d(-jit, jit);
+        const int v = mean + d(g);
+        return v < 1 ? std::size_t{1} : static_cast<std::size_t>(v);
+    };
+    auto sample_burst = [&](std::mt19937& g) -> unsigned {
+        const auto& bl = cfg.burst_loss;
+        if (bl.max_burst_pkts <= 1u) return 1u;
+        std::uniform_int_distribution<unsigned> d(1u, bl.max_burst_pkts);
+        return d(g);
+    };
+    std::size_t next_burst_at = sample_interval(burst_rng);
+    unsigned    burst_remaining = 0u;
 
     LibFlute::Encoder encoder(
         /*tsi=*/16, cfg.mtu, /*rate_limit_kbps=*/0,
@@ -211,6 +256,7 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
                 return true;
             }
             if (ToiOf(packet) != 0) {
+                ++file_packet_idx;
                 // Targeted source-ESI drops: parse the FEC payload ID
                 // out of the packet (scheme-aware via codepoint) and
                 // drop if (sbn, esi) is in the configured set. Each
@@ -229,9 +275,28 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
                     }
                 }
                 if (cfg.drop_every > 0) {
-                    ++file_packet_idx;
                     if (file_packet_idx %
                             static_cast<std::size_t>(cfg.drop_every) == 0) {
+                        ++dropped;
+                        return true;
+                    }
+                }
+                // Burst-loss model. Distributed-fade pattern: drops
+                // hit different SBNs across the file (the realistic
+                // 5G-BC pedestrian-channel regime). Falls through
+                // to the decoder when not in a burst.
+                if (cfg.burst_loss.mean_interval_pkts > 0u) {
+                    if (burst_remaining > 0u) {
+                        --burst_remaining;
+                        ++dropped;
+                        return true;
+                    }
+                    if (file_packet_idx >= next_burst_at) {
+                        const unsigned size = sample_burst(burst_rng);
+                        burst_remaining = size - 1u;     // drop this + (size-1) more
+                        next_burst_at = file_packet_idx +
+                                        sample_interval(burst_rng);
+                        ++burst_count;
                         ++dropped;
                         return true;
                     }
@@ -267,6 +332,8 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
     r.ds           = decoder.stats();
     r.dropped_count         = dropped;
     r.targeted_src_drops    = targeted_dropped;
+    r.burst_count           = burst_count;
+    r.burst_loss            = cfg.burst_loss;
     r.sub_block_size_target = cfg.sub_block_size_target;
 
     r.ok = (received != nullptr) &&
@@ -303,8 +370,7 @@ ScenarioResult RunScenario(const ScenarioConfig& cfg) {
     return r;
 }
 
-void PrintHeader(unsigned mtu) {
-    std::printf("== libflute round-trip benchmark (mtu=%u) ==\n\n", mtu);
+void PrintColumns() {
     std::printf("%-7s  %-13s  %-9s  %-7s  %10s  %10s  %10s  %14s  %14s  %s\n",
                 "F (MB)", "FEC", "loss", "W",
                 "enc (ms)", "dec (ms)", "throughput", "overhead",
@@ -314,6 +380,11 @@ void PrintHeader(unsigned mtu) {
                 "----------", "----------", "----------",
                 "--------------", "--------------",
                 "---------------");
+}
+
+void PrintHeader(unsigned mtu) {
+    std::printf("== libflute round-trip benchmark (mtu=%u) ==\n\n", mtu);
+    PrintColumns();
 }
 
 // Compact rendering of the partitioner outputs the codec actually
@@ -346,6 +417,13 @@ void PrintRow(const ScenarioResult& r) {
     if (r.targeted_src_drops > 0) {
         std::snprintf(loss_label, sizeof(loss_label),
                        "%zusrc-drop", r.targeted_src_drops);
+    } else if (r.burst_loss.mean_interval_pkts > 0) {
+        // burst-loss profile: max-burst@mean-interval (e.g. b5@333p
+        // = bursts of up to 5 packets, ~one burst per 333 packets).
+        std::snprintf(loss_label, sizeof(loss_label),
+                       "b%u@%up",
+                       r.burst_loss.max_burst_pkts,
+                       r.burst_loss.mean_interval_pkts);
     } else if (r.drop_every > 0) {
         std::snprintf(loss_label, sizeof(loss_label),
                        "1in%d", r.drop_every);
@@ -508,5 +586,62 @@ int main() {
 #endif
         std::fflush(stdout);
     }
+
+#ifdef RAPTOR_ENABLED
+    // Burst-loss section: realistic 5G-BC FeMBMS urban-pedestrian
+    // channel pattern. Wire rate 20 Mbps (mid-64QAM MCS in an 8 MHz
+    // FeMBMS channel) → at mtu=1500 that's ~1667 pkts/sec, so a
+    // 200 ± 100 ms inter-burst cadence is mean=333 pkts ± 167 pkts.
+    // Each burst drops up to 5 consecutive packets — a destructive
+    // multipath fade. F=5 MB sits at Z=1 and lands all bursts in
+    // block 0 (single-SBN baseline; the worker pool will see no
+    // benefit here). F=100 MB partitions to Z>1 across both
+    // schemes, distributing the fades across SBNs — this is the
+    // scenario Phase 2 (decoder worker pool) targets.
+    //
+    // Per-scheme redundancy: 15 % for R10, 5 % for RaptorQ (literature-
+    // typical surplus levels for each scheme's recovery characteristics).
+    if (!skip_raptor) {
+        constexpr unsigned kBurstWireMbps          = 20;
+        constexpr unsigned kBurstPktsPerSec        =
+            (kBurstWireMbps * 1000u * 1000u) / (1500u * 8u);     // ≈ 1666
+        constexpr unsigned kBurstMeanIntervalMs    = 200;
+        constexpr unsigned kBurstJitterMs          = 100;
+        constexpr unsigned kBurstMaxLenPkts        = 5;
+        const unsigned mean_pkts =
+            (kBurstPktsPerSec * kBurstMeanIntervalMs) / 1000u;   // ≈ 333
+        const unsigned jitter_pkts =
+            (kBurstPktsPerSec * kBurstJitterMs) / 1000u;         // ≈ 166
+
+        std::printf("\n== burst-loss scenarios (mtu=%u, wire=%u Mbps, "
+                    "%u ± %u ms inter-burst, 1-%u pkt bursts) ==\n\n",
+                    mtu, kBurstWireMbps, kBurstMeanIntervalMs,
+                    kBurstJitterMs, kBurstMaxLenPkts);
+        PrintColumns();
+
+        for (auto F_mb : {5u, 100u}) {
+            const std::size_t F = static_cast<std::size_t>(F_mb) *
+                                  1024ULL * 1024ULL;
+            for (auto fec : {LibFlute::FecScheme::Raptor,
+                              LibFlute::FecScheme::RaptorQ}) {
+                ScenarioConfig sc{};
+                sc.F                            = F;
+                sc.fec                          = fec;
+                sc.mtu                          = mtu;
+                sc.redundancy_level             =
+                    (fec == LibFlute::FecScheme::Raptor) ? 15u : 5u;
+                sc.sub_block_size_target        =
+                    (fec == LibFlute::FecScheme::Raptor) ? bench_w_r10
+                                                         : bench_w_raptorq;
+                sc.burst_loss.mean_interval_pkts   = mean_pkts;
+                sc.burst_loss.interval_jitter_pkts = jitter_pkts;
+                sc.burst_loss.max_burst_pkts       = kBurstMaxLenPkts;
+                sc.no_decode                       = no_decode;
+                PrintRow(RunScenario(sc));
+            }
+            std::fflush(stdout);
+        }
+    }
+#endif
     return 0;
 }
