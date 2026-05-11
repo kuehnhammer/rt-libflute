@@ -1,0 +1,22 @@
+var searchData=
+[
+  ['fdt_5fbps_324',['fdt_bps',['../structLibFlute_1_1Encoder_1_1OverheadEstimate.html#a97721073bed8ebd0d93f7b77124e2635',1,'LibFlute::Encoder::OverheadEstimate']]],
+  ['fdt_5fpackets_5femitted_325',['fdt_packets_emitted',['../structLibFlute_1_1EncoderStats.html#a592fa7864d431c9daf77aba8ae331e32',1,'LibFlute::EncoderStats']]],
+  ['fdt_5fperiod_5fseconds_326',['fdt_period_seconds',['../structLibFlute_1_1Encoder_1_1OverheadParameters.html#ac65a5ce0f104fd7d2b1078637a8ae9fd',1,'LibFlute::Encoder::OverheadParameters']]],
+  ['fdt_5fsize_5fbytes_327',['fdt_size_bytes',['../structLibFlute_1_1Encoder_1_1OverheadParameters.html#a995b685eeaa402bf5b9ed82eda836cf0',1,'LibFlute::Encoder::OverheadParameters']]],
+  ['fdts_5faccepted_328',['fdts_accepted',['../structLibFlute_1_1DecoderStats.html#ae122b5407e9653b25fd54d00d7f8baee',1,'LibFlute::DecoderStats']]],
+  ['fdts_5frejected_5fexpired_329',['fdts_rejected_expired',['../structLibFlute_1_1DecoderStats.html#afca0b335a9ee8f9c3f828838bc6b04ac',1,'LibFlute::DecoderStats']]],
+  ['fdts_5frejected_5fstale_330',['fdts_rejected_stale',['../structLibFlute_1_1DecoderStats.html#a1f2dc5f1252d2113c9dd70d59bb7d911',1,'LibFlute::DecoderStats']]],
+  ['fec_5finstance_5fid_331',['fec_instance_id',['../structLibFlute_1_1FileTransmissionConfig.html#a0cc07ae6a1bd8d4ef2b2870f504dd00d',1,'LibFlute::FileTransmissionConfig']]],
+  ['fec_5foti_332',['fec_oti',['../structLibFlute_1_1FileDeliveryTable_1_1FileEntry.html#a48714d525451464bbca15334195cd272',1,'LibFlute::FileDeliveryTable::FileEntry']]],
+  ['fec_5fredundancy_333',['fec_redundancy',['../structLibFlute_1_1Encoder_1_1OverheadParameters.html#a8cfbd8ed46f5920b2c6f5d6791c791bd',1,'LibFlute::Encoder::OverheadParameters']]],
+  ['fec_5fredundancy_5flevel_334',['fec_redundancy_level',['../structLibFlute_1_1FileDeliveryTable_1_1FileEntry.html#abc026f86dcd650ca9b24f58564627b95',1,'LibFlute::FileDeliveryTable::FileEntry::fec_redundancy_level()'],['../structLibFlute_1_1FileTransmissionConfig.html#a6e17af34f8d5e169b72d823df1efc00d',1,'LibFlute::FileTransmissionConfig::fec_redundancy_level()']]],
+  ['fec_5frepair_5fbps_335',['fec_repair_bps',['../structLibFlute_1_1Encoder_1_1OverheadEstimate.html#a7bf7809234eaff2505a0206058f036f2',1,'LibFlute::Encoder::OverheadEstimate']]],
+  ['fec_5fscheme_336',['fec_scheme',['../structLibFlute_1_1Encoder_1_1OverheadParameters.html#a2142a6a8f360a321c5b97ab27da87fe2',1,'LibFlute::Encoder::OverheadParameters']]],
+  ['fec_5ftransformer_337',['fec_transformer',['../structLibFlute_1_1FileDeliveryTable_1_1FileEntry.html#a0551267d51bb4015e44224944b960205',1,'LibFlute::FileDeliveryTable::FileEntry']]],
+  ['file_5fetag_338',['file_etag',['../structLibFlute_1_1FileDeliveryTable_1_1FileEntry.html#a01d438a6600109d0ea4de80a3f4454ef',1,'LibFlute::FileDeliveryTable::FileEntry']]],
+  ['files_5fcompleted_339',['files_completed',['../structLibFlute_1_1DecoderStats.html#a8867f37d0eaef0fc56b9dab27ea83a8e',1,'LibFlute::DecoderStats']]],
+  ['files_5fdiscarded_5fincomplete_340',['files_discarded_incomplete',['../structLibFlute_1_1DecoderStats.html#a8ad063b0e137c23fd1d5f94fe14383e2',1,'LibFlute::DecoderStats']]],
+  ['files_5fqueued_341',['files_queued',['../structLibFlute_1_1EncoderStats.html#a76a367065a9830dcfdd6f17333287fed',1,'LibFlute::EncoderStats']]],
+  ['files_5ftransmitted_342',['files_transmitted',['../structLibFlute_1_1EncoderStats.html#a046ba7b279b12a0e806bbb0b4c5ce591',1,'LibFlute::EncoderStats']]]
+];
