@@ -75,7 +75,9 @@ include_directories(
 
 configure_file("include/Version.h.in" "Version.h")
 
-set(CMAKE_CXX_CLANG_TIDY clang-tidy)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CXX_CLANG_TIDY clang-tidy)
+endif()
 
 if(ENABLE_RAPTOR)
   # bitstem-fec is shipped as a binary distribution under
