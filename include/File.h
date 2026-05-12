@@ -68,9 +68,17 @@ namespace LibFlute {
       virtual ~File();
 
      /**
-      *  Write the data from an encoding symbol into the appropriate place in the buffer
+      *  Write the data from an encoding symbol into the appropriate place in the buffer.
+      *
+      *  @return true if the symbol advanced reception state (i.e. it
+      *          filled a previously-empty source slot or was passed to
+      *          the FEC codec while the block was still pending);
+      *          false if it was a duplicate, arrived for an already-
+      *          complete block, or arrived for an already-complete
+      *          file. Stats consumers use this to count only symbols
+      *          actually consumed by the decoder.
       */
-      void put_symbol(const EncodingSymbol& symbol);
+      bool put_symbol(const EncodingSymbol& symbol);
 
      /**
       *  Check if the file is complete

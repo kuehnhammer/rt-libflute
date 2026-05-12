@@ -192,15 +192,26 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
         // max_source_block_length) is "source", ESI >= K is "repair".
         // CompactNoCode never sends repair so the receiver naturally
         // counts every symbol as source.
+        //
+        // Only count symbols that put_symbol() actually consumed —
+        // i.e. that filled an empty slot or were passed to the codec
+        // while the block was still pending. Symbols arriving for an
+        // already-complete block (common on multi-block files: block 0
+        // auto-finalises at its K-th source ESI, but the encoder keeps
+        // emitting block 0's repair ESIs until it moves to block 1) or
+        // duplicate source ESIs are not "consumed" and would otherwise
+        // inflate repair_symbols_received with redundancy the decoder
+        // discarded.
         const std::uint32_t k_block =
             _files[alc.toi()]->fec_oti().max_source_block_length;
         std::uint64_t src = 0, rep = 0;
         for (const auto& symbol : encoding_symbols) {
           spdlog::debug("received TOI {} SBN {} ID {}",
                         alc.toi(), symbol.source_block_number(), symbol.id());
+          const bool consumed = _files[alc.toi()]->put_symbol(symbol);
+          if (!consumed) continue;
           if (k_block > 0 && symbol.id() >= k_block) ++rep;
           else ++src;
-          _files[alc.toi()]->put_symbol(symbol);
         }
         _stats.source_symbols_received.fetch_add(src, std::memory_order_relaxed);
         _stats.repair_symbols_received.fetch_add(rep, std::memory_order_relaxed);

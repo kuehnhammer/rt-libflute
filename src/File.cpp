@@ -176,11 +176,11 @@ LibFlute::File::~File()
   }
 }
 
-auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> void
+auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> bool
 {
   if(_complete) {
     spdlog::debug("Not handling symbol {} , SBN {} since file is already complete",symbol.id(),symbol.source_block_number());
-    return;
+    return false;
   }
   if (symbol.source_block_number() >= _source_blocks.size()) {
     throw std::runtime_error("Source Block number too high");
@@ -195,7 +195,7 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
     // than needed for repair tolerance).
     spdlog::trace("Ignoring symbol {} since block {} is already complete",
                   symbol.id(), symbol.source_block_number());
-    return;
+    return false;
   }
 
   if (symbol.id() >= source_block.symbols.size()) {
@@ -204,28 +204,30 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> voi
 
   LibFlute::Symbol& target_symbol = source_block.symbols[symbol.id()];
 
-  if (!target_symbol.complete) {
-    // For FEC transformers that own symbol-byte writes (RaptorFEC's
-    // lent-buffer Decoder writes source bytes into File::_buffer
-    // directly via AddReceivedSymbol), skip our own decode_to copy
-    // — it'd be a duplicate memcpy to the same file_buffer offset
-    // the codec is about to (or just did) populate.
-    const bool fec_owns_symbol_bytes =
-        _meta.fec_transformer &&
-        _meta.fec_transformer->writes_symbol_bytes_directly();
-    if (!fec_owns_symbol_bytes) {
-      symbol.decode_to(target_symbol.data, target_symbol.length);
-    }
-    target_symbol.complete = true;
-    ++source_block.completed_symbol_count;
-    if (_meta.fec_transformer) {
-      _meta.fec_transformer->process_symbol(source_block, symbol.id(),
-                                             symbol.bytes());
-    }
-    check_source_block_completion(source_block);
-    check_file_completion();
+  if (target_symbol.complete) {
+    return false;
   }
 
+  // For FEC transformers that own symbol-byte writes (RaptorFEC's
+  // lent-buffer Decoder writes source bytes into File::_buffer
+  // directly via AddReceivedSymbol), skip our own decode_to copy
+  // — it'd be a duplicate memcpy to the same file_buffer offset
+  // the codec is about to (or just did) populate.
+  const bool fec_owns_symbol_bytes =
+      _meta.fec_transformer &&
+      _meta.fec_transformer->writes_symbol_bytes_directly();
+  if (!fec_owns_symbol_bytes) {
+    symbol.decode_to(target_symbol.data, target_symbol.length);
+  }
+  target_symbol.complete = true;
+  ++source_block.completed_symbol_count;
+  if (_meta.fec_transformer) {
+    _meta.fec_transformer->process_symbol(source_block, symbol.id(),
+                                           symbol.bytes());
+  }
+  check_source_block_completion(source_block);
+  check_file_completion();
+  return true;
 }
 
 auto LibFlute::File::check_source_block_completion( SourceBlock& block ) -> void

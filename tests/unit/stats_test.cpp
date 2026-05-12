@@ -303,4 +303,44 @@ TEST(DecoderStats, RaptorLossyRoundTripDistinguishesSourceVsRepair) {
            "the FEC repair path).";
     EXPECT_EQ(ds.files_completed, 1U);
 }
+
+// Lossless multi-block Raptor reception: the codec auto-finalises each
+// source block on its K-th source ESI, after which the remaining
+// repair-ESI packets for that block arrive while the FILE is still
+// pending (other blocks haven't completed). Those packets are not
+// consumed by the decoder — the codec already discarded them as
+// IsDecoded() was true. They must NOT inflate repair_symbols_received,
+// because the consumer surfaces rep / (src + rep) as "FEC consumption"
+// and expects zero on a clean channel.
+TEST(DecoderStats, RaptorLosslessMultiBlockDoesNotCountUnusedRepair) {
+    Harness h;
+    // R10 partitioning is Z = ceil(Kt / K_max=8192). With MTU=1500 the
+    // codec picks T = 1456, so a 14 MB file needs Kt = ceil(14e6/1456)
+    // = 9616 source symbols → Z = 2 source blocks. That's the smallest
+    // size that exercises the "block 0 complete, file not complete"
+    // window where unused repair symbols arrive.
+    h.data = MakeBuffer(14UL * 1024UL * 1024UL);
+
+    LibFlute::Encoder encoder(
+        /*tsi=*/1, /*mtu=*/1500, /*rate_limit_kbps=*/0,
+        [&](std::span<const std::uint8_t> p) {
+            h.decoder.feed_packet(p);
+            return true;
+        });
+    auto data_copy = h.data;
+    encoder.send("multiblock.bin", "application/octet-stream",
+                  LibFlute::Encoder::seconds_since_epoch() + 60,
+                  data_copy.data(), data_copy.size(),
+                  LibFlute::FecScheme::Raptor);
+    encoder.flush();
+    h.decoder.flush_pending_decodes();
+    ASSERT_NE(h.received, nullptr);
+
+    auto ds = h.decoder.stats();
+    EXPECT_EQ(ds.files_completed, 1U);
+    EXPECT_GT(ds.source_symbols_received, 0U);
+    EXPECT_EQ(ds.repair_symbols_received, 0U)
+        << "Lossless reception must not count repair symbols the "
+           "codec didn't use to decode any block.";
+}
 #endif  // RAPTOR_ENABLED
