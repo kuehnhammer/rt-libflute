@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "fec/FecLoader.h"
@@ -98,6 +99,20 @@ namespace LibFlute {
         DecoderHandle dec;
         std::uint16_t K = 0;            // source-symbol count for THIS block
         std::uint32_t block_size = 0;   // bytes -- usually K*T, smaller for last block
+        // Total symbols add_received_symbol'd into this Decoder. Drives
+        // the every-N opportunistic try_decode trigger in process_symbol:
+        // mid-stream matrix-solve attempts pay off when the FDT-removal
+        // trigger may be delayed (long sessions, sparse FDT updates).
+        std::uint32_t received_count = 0;
+        // ESIs already passed to add_received_symbol on this Decoder.
+        // libflute used to dedup via the slot vector's
+        // `target_symbol.complete` flag; the Raptor path no longer
+        // touches that vector (the codec is free to use any ESI in
+        // [0, K_max), and slot-by-ESI is the wrong storage shape).
+        // Receivers MUST still filter duplicates so the Decoder stats
+        // (source_symbols_received / repair_symbols_received) don't
+        // count the same wire packet twice on retransmits.
+        std::unordered_set<std::uint32_t> seen_esis;
       };
 
       // Per-source-block decoder state; survives across process_symbol()
@@ -266,9 +281,16 @@ namespace LibFlute {
       // at try_decode_pending (FDT end-of-transmission). 0 = sequential.
       // Bounded per-file by Z; useful at Z ≥ 2 with distributed loss
       // (multiple SBNs needing matrix-solve).
+      // `fec_redundancy_level` ⇒ TS 26.346 Rel-11 mbms2012 attribute
+      // carried per-File on the FDT. When present, drives the
+      // per-block ESI buffer sizing (= K·(1 + FRL/100)) so the
+      // decoder matches the encoder's emit overhead exactly. When
+      // absent, the default 1.15 stays in force; the FDT-removal
+      // trigger in Decoder.cpp is the safety net for the lossy path.
       explicit RaptorFEC(LibFlute::FecScheme scheme,
-                          unsigned dec_worker_threads = 0);
-      RaptorFEC() : RaptorFEC(LibFlute::FecScheme::Raptor, 0) {}
+                          unsigned dec_worker_threads = 0,
+                          std::optional<unsigned> fec_redundancy_level = std::nullopt);
+      RaptorFEC() : RaptorFEC(LibFlute::FecScheme::Raptor, 0, std::nullopt) {}
 
       ~RaptorFEC() override;
 

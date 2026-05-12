@@ -198,8 +198,37 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> boo
     return false;
   }
 
+  // For FEC transformers that own symbol-byte writes (RaptorFEC's
+  // lent-buffer Decoder writes source bytes into File::_buffer
+  // directly via AddReceivedSymbol), bitstem-fec maintains its own
+  // per-ESI state — dedup, slot fill, decode trigger. The libflute-
+  // owned ESI-indexed `source_block.symbols` vector adds no value
+  // for that path and its `target_K`-sized bound spuriously rejects
+  // any ESI ≥ K·surplus_packet_ratio. Real-world R10 / RaptorQ
+  // encoders are free to use any ESI in [0, K_max) (RFC 5053 §5.1.1,
+  // RFC 6330 §3.2) and the receiver MUST NOT cap based on its own
+  // estimate of the encoder's repair budget. Bypass the slot
+  // bookkeeping entirely; the codec handles dedup / completion
+  // signalling via decoder_is_decoded.
+  const bool fec_owns_symbol_bytes =
+      _meta.fec_transformer &&
+      _meta.fec_transformer->writes_symbol_bytes_directly();
+  if (fec_owns_symbol_bytes) {
+    const bool consumed = _meta.fec_transformer->process_symbol(
+        source_block, symbol.id(), symbol.bytes());
+    check_source_block_completion(source_block);
+    check_file_completion();
+    return consumed;
+  }
+
+  // CompactNoCode (no FEC transformer): ESI must be in [0, K). The
+  // slot array IS the storage, so out-of-range ESIs really are a
+  // protocol violation.
   if (symbol.id() >= source_block.symbols.size()) {
-    throw std::runtime_error("Encoding Symbol ID too high");
+    throw std::runtime_error(
+        "Encoding Symbol ID too high (ESI=" + std::to_string(symbol.id()) +
+        ", target_K=" + std::to_string(source_block.symbols.size()) +
+        ", SBN=" + std::to_string(symbol.source_block_number()) + ")");
   }
 
   LibFlute::Symbol& target_symbol = source_block.symbols[symbol.id()];
@@ -208,23 +237,9 @@ auto LibFlute::File::put_symbol( const LibFlute::EncodingSymbol& symbol ) -> boo
     return false;
   }
 
-  // For FEC transformers that own symbol-byte writes (RaptorFEC's
-  // lent-buffer Decoder writes source bytes into File::_buffer
-  // directly via AddReceivedSymbol), skip our own decode_to copy
-  // — it'd be a duplicate memcpy to the same file_buffer offset
-  // the codec is about to (or just did) populate.
-  const bool fec_owns_symbol_bytes =
-      _meta.fec_transformer &&
-      _meta.fec_transformer->writes_symbol_bytes_directly();
-  if (!fec_owns_symbol_bytes) {
-    symbol.decode_to(target_symbol.data, target_symbol.length);
-  }
+  symbol.decode_to(target_symbol.data, target_symbol.length);
   target_symbol.complete = true;
   ++source_block.completed_symbol_count;
-  if (_meta.fec_transformer) {
-    _meta.fec_transformer->process_symbol(source_block, symbol.id(),
-                                           symbol.bytes());
-  }
   check_source_block_completion(source_block);
   check_file_completion();
   return true;

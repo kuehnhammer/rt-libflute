@@ -291,6 +291,19 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
       encoding_id = strtoul(val, nullptr, 0);
     }
 
+    // TS 26.346 cl. 7.2.10.2 (Rel-11/12 mbms2012:FEC-Redundancy-Level)
+    // is parsed here, BEFORE the RaptorFEC ctor below, so the decoder
+    // can size each block's ESI buffer (= K·(1 + FRL/100)) to match
+    // the encoder's emit overhead. The same value is also copied into
+    // the FileEntry further down for diagnostics / FDT round-trip.
+    std::optional<uint32_t> fec_redundancy_level;
+    if (const char* frl =
+            FindAttrByNs(file, ns, kNsMbms2012, "FEC-Redundancy-Level");
+        frl != nullptr) {
+      fec_redundancy_level =
+          static_cast<uint32_t>(strtoul(frl, nullptr, 0));
+    }
+
     std::shared_ptr<FecTransformer> fec_transformer = nullptr;
 
     switch (encoding_id){
@@ -307,9 +320,13 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
                               : FecScheme::RaptorQ;
         try {
           fec_transformer = std::make_shared<RaptorFEC>(
-              scheme, fec_dec_worker_threads);
-          spdlog::debug("Received FDT entry for a {} encoded file",
-                        scheme == FecScheme::Raptor ? "R10 (Raptor)" : "RaptorQ");
+              scheme, fec_dec_worker_threads, fec_redundancy_level);
+          spdlog::debug("FDT entry: {} TOI={} FRL={}",
+                        scheme == FecScheme::Raptor ? "R10" : "RaptorQ",
+                        toi,
+                        fec_redundancy_level.has_value()
+                            ? std::to_string(*fec_redundancy_level)
+                            : std::string("default"));
         } catch (const std::exception& e) {
           spdlog::warn("Skipping FDT entry — FEC unavailable: {}", e.what());
           continue;  // skip this <File> element entirely
@@ -428,12 +445,10 @@ LibFlute::FileDeliveryTable::FileDeliveryTable(uint32_t instance_id, char* buffe
         etag != nullptr) {
       fe.file_etag = etag;
     }
-    if (const char* frl =
-            FindAttrByNs(file, ns, kNsMbms2012, "FEC-Redundancy-Level");
-        frl != nullptr) {
-      fe.fec_redundancy_level =
-          static_cast<uint32_t>(strtoul(frl, nullptr, 0));
-    }
+    // FEC-Redundancy-Level was parsed earlier (above the FEC switch) so
+    // the decoder-side RaptorFEC ctor could be sized to match the
+    // encoder's emit overhead.
+    fe.fec_redundancy_level = fec_redundancy_level;
     auto collect_alt_cl = [&](tinyxml2::XMLElement* parent,
                                 std::vector<std::string>& out) {
       for (auto* e = parent->FirstChildElement(); e != nullptr;

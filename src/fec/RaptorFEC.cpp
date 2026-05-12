@@ -283,7 +283,8 @@ LibFlute::RaptorFEC::RaptorFEC(const FecOti& fec_oti,
 }
 
 LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme,
-                                unsigned dec_worker_threads)
+                                unsigned dec_worker_threads,
+                                std::optional<unsigned> fec_redundancy_level)
     // Init order matches member declaration order in RaptorFEC.h
     // (Wreorder-ctor under -Werror).
     : _dec_worker_threads(dec_worker_threads)
@@ -303,6 +304,14 @@ LibFlute::RaptorFEC::RaptorFEC(LibFlute::FecScheme scheme,
     throw std::runtime_error(
         "RaptorFEC: bitstem-fec was built without support for "
         "the requested scheme");
+  }
+
+  // Match the encoder's per-block emit overhead. Same formula as the
+  // encoder-side ctor above; the FDT round-trip carries FRL on every
+  // File element so encoder + decoder agree on target_K and File.cpp's
+  // ESI bound check stops dropping in-range repair symbols.
+  if (fec_redundancy_level.has_value()) {
+    surplus_packet_ratio = 1.0f + static_cast<float>(*fec_redundancy_level) / 100.0f;
   }
 }
 
@@ -409,12 +418,48 @@ bool LibFlute::RaptorFEC::process_symbol(LibFlute::SourceBlock& srcblk,
     // symbol packets carry redundancy we no longer need.
     spdlog::trace("Skipped symbol after early decode: SBN {}, ESI {}",
                   srcblk.id, id);
-    return true;
+    return false;
+  }
+  auto [_, inserted] = ctx.seen_esis.insert(id);
+  if (!inserted) {
+    // Duplicate ESI on the wire — encoder retransmit or carousel
+    // wrap-around. The codec doesn't expose a "have I seen this ESI"
+    // query, so the dedup lives here. Return false so the caller
+    // doesn't double-count this symbol in the source/repair stats.
+    spdlog::trace("Duplicate ESI on already-pending block: SBN {}, ESI {}",
+                  srcblk.id, id);
+    return false;
   }
   loader.decoder_add_received_symbol(
       ctx.dec.get(), id,
       reinterpret_cast<const std::uint8_t*>(bytes.data()),
       bytes.size());
+  ++ctx.received_count;
+
+  // Opportunistic intermediate decode trigger. With matched FRL the
+  // FDT-removal trigger in Decoder.cpp is sufficient — but the FDT
+  // round is not always tight (sparse FDT updates, long sessions,
+  // out-of-order FDT delivery). Once we hold ≥K symbols, every
+  // kIntermediateDecodeStride additional symbols, attempt a matrix
+  // solve. The codec is idempotent: once IsDecoded() flips, this
+  // function early-exits on subsequent calls. Source-symbol-only
+  // (lossless) blocks finalise inside add_received_symbol and never
+  // reach this trigger.
+  //
+  // Stride is a compromise between matrix-solve cost (a single Raptor
+  // factor at K=8192 is ~60ms) and recovery latency (waiting for the
+  // FDT-removal trigger can be seconds at typical FDT cadence).
+  constexpr std::uint32_t kIntermediateDecodeStride = 5;
+  if (ctx.K > 0 &&
+      ctx.received_count >= ctx.K &&
+      ((ctx.received_count - ctx.K) % kIntermediateDecodeStride) == 0) {
+    // Return value ignored — next add_received_symbol will see
+    // IsDecoded() and short-circuit; the file-completion path runs
+    // off check_source_block_completion below.
+    [[maybe_unused]] const int ok = loader.decoder_try_decode(ctx.dec.get());
+    spdlog::trace("Intermediate try_decode SBN {}, received {}/{}, ok={}",
+                  srcblk.id, ctx.received_count, ctx.K, ok);
+  }
   return true;
 }
 

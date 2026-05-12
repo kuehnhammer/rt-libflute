@@ -304,6 +304,75 @@ TEST(DecoderStats, RaptorLossyRoundTripDistinguishesSourceVsRepair) {
     EXPECT_EQ(ds.files_completed, 1U);
 }
 
+// Honours the FDT-carried mbms2012:FEC-Redundancy-Level: encoder is
+// configured with FRL=50 (= 1.50·K emit overhead), enough source
+// packets are dropped that completion requires repair ESIs in
+// [1.15·K, 1.50·K) — i.e. above the decoder's hardcoded-default
+// surplus_packet_ratio of 1.15. Without the FDT plumbing the
+// per-block symbols vector is sized to 1.15·K and File::put_symbol
+// throws on those higher ESIs ("Encoding Symbol ID too high"), so
+// the file never completes. With the plumbing in place the decoder
+// matches the encoder's emit overhead and the file completes off
+// the repair path.
+TEST(DecoderStats, RaptorLossyRoundTripHonoursFdtRedundancyLevel) {
+    Harness h;
+    // 200 KB / T≈1456 ⇒ K≈138 (one source block at MTU=1500). Single
+    // block keeps the per-ESI accounting exact and avoids cross-block
+    // averaging effects.
+    h.data = MakeBuffer(200000);
+
+    std::size_t file_packet_idx = 0;
+    // 25 % loss: enough source missed that the decoder needs ~0.25·K
+    // repair to complete, which is above the 0.15·K hardcoded
+    // default surplus.
+    constexpr int kDropEveryNth = 4;
+
+    LibFlute::Encoder encoder(
+        /*tsi=*/1, /*mtu=*/1500, /*rate_limit_kbps=*/0,
+        [&](std::span<const std::uint8_t> p) {
+            // Drop 1-in-N file packets (TOI != 0) to force repair use.
+            if (p.size() >= 12) {
+                const std::uint16_t toi =
+                    static_cast<std::uint16_t>((p[10] << 8) | p[11]);
+                if (toi != 0) {
+                    ++file_packet_idx;
+                    if (file_packet_idx % kDropEveryNth == 0) return true;
+                }
+            }
+            h.decoder.feed_packet(p);
+            return true;
+        });
+
+    // FRL=50 ⇒ encoder emits up to 1.50·K ESIs per block — well above
+    // the 1.15·K default bound. The decoder MUST receive this value
+    // via the FDT to size its ESI buffers correctly.
+    LibFlute::FileTransmissionConfig fec_config{};
+    fec_config.scheme                = LibFlute::FecScheme::Raptor;
+    fec_config.fec_redundancy_level  = 50U;
+
+    auto data_copy = h.data;
+    encoder.send("raptor_frl50.bin", "application/octet-stream",
+                  LibFlute::Encoder::seconds_since_epoch() + 60,
+                  data_copy.data(), data_copy.size(),
+                  fec_config);
+    encoder.flush();
+    h.decoder.flush_pending_decodes();
+
+    ASSERT_NE(h.received, nullptr)
+        << "File should have completed via the repair path. Without the "
+           "FRL plumbing the decoder caps its per-block symbol buffer at "
+           "1.15·K and throws on encoder ESIs in [1.15·K, 1.50·K) — see "
+           "File.cpp:201 ('Encoding Symbol ID too high').";
+
+    auto ds = h.decoder.stats();
+    EXPECT_EQ(ds.files_completed, 1U);
+    EXPECT_GT(ds.source_symbols_received, 0U);
+    EXPECT_GT(ds.repair_symbols_received, 0U)
+        << "Decoder should have observed repair symbols arrive AND "
+           "consumed at least some of them (matched-FRL bound lets "
+           "high-ESI repair through).";
+}
+
 // Lossless multi-block Raptor reception: the codec auto-finalises each
 // source block on its K-th source ESI, after which the remaining
 // repair-ESI packets for that block arrive while the FILE is still
