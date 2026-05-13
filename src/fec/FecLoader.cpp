@@ -11,7 +11,17 @@
 
 #include "fec/FecLoader.h"
 
-#include <dlfcn.h>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
 
 #include "spdlog/spdlog.h"
 
@@ -19,21 +29,58 @@ namespace LibFlute {
 
 namespace {
 
-// SONAME of the codec library. The bitstem-fec build sets
-// SOVERSION=0 and exports the C ABI under linker version tag
-// BITSTEM_FEC_0; consumers MUST dlopen via the SONAME (libfec.so.0)
-// rather than the unversioned libfec.so symlink, so a major-version
-// bump on the codec side surfaces as a clean dlopen failure here
-// rather than silently picking up an ABI-incompatible build.
+// Codec library to load. On POSIX we dlopen the SONAME (libfec.so.0)
+// rather than the unversioned libfec.so symlink so a major-version
+// bump on the codec side surfaces as a clean load failure here
+// rather than silently picking up an ABI-incompatible build. On
+// Windows DLLs aren't soname-versioned — LoadLibrary takes the bare
+// filename — and the FetchContent-style packaging staged by
+// BitstemFEC.cmake ships exactly one fec.dll per zip.
+#ifdef _WIN32
+constexpr const char* kSoname = "fec.dll";
+#else
 constexpr const char* kSoname = "libfec.so.0";
+#endif
+
+#ifdef _WIN32
+// On Windows the loader API is GetLastError() based — GetProcAddress
+// returning NULL is itself the failure signal (no symbol may legally
+// resolve to NULL). Format the Win32 error so log messages match the
+// dlerror() shape used on POSIX.
+std::string LastErrorString() {
+  const DWORD err = ::GetLastError();
+  char* buf = nullptr;
+  const DWORD len = ::FormatMessageA(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+          FORMAT_MESSAGE_IGNORE_INSERTS,
+      nullptr, err, 0, reinterpret_cast<LPSTR>(&buf), 0, nullptr);
+  std::string msg = (len > 0 && buf != nullptr)
+                        ? std::string(buf, len)
+                        : ("error " + std::to_string(err));
+  if (buf != nullptr) {
+    ::LocalFree(buf);
+  }
+  // Strip the trailing CRLF that FormatMessage tacks on.
+  while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
+    msg.pop_back();
+  }
+  return msg;
+}
+#endif
 
 // Helper: resolve `name` from `handle`, returning nullptr (and
-// logging) on failure. dlerror() must be cleared before each dlsym
-// call per POSIX — failures are signalled by dlsym returning NULL,
-// which is itself a valid symbol address, so we use the dlerror-
-// based check.
+// logging) on failure.
 template <typename Fn>
 Fn dlsym_or_null(void* handle, const char* name) {
+#ifdef _WIN32
+  FARPROC sym = ::GetProcAddress(static_cast<HMODULE>(handle), name);
+  if (sym == nullptr) {
+    spdlog::error("FecLoader: GetProcAddress(\"{}\") failed: {}", name,
+                  LastErrorString());
+    return nullptr;
+  }
+  return reinterpret_cast<Fn>(sym);
+#else
   ::dlerror();  // clear
   void* sym = ::dlsym(handle, name);
   if (const char* err = ::dlerror(); err != nullptr) {
@@ -41,6 +88,7 @@ Fn dlsym_or_null(void* handle, const char* name) {
     return nullptr;
   }
   return reinterpret_cast<Fn>(sym);
+#endif
 }
 
 }  // namespace
@@ -51,14 +99,23 @@ FecLoader& FecLoader::instance() {
 }
 
 FecLoader::FecLoader() {
+#ifdef _WIN32
+  _handle = ::LoadLibraryA(kSoname);
+#else
   _handle = ::dlopen(kSoname, RTLD_NOW | RTLD_LOCAL);
+#endif
   if (_handle == nullptr) {
     // Expected on production receivers without an FEC license; not
     // an error per se. Warn so the operator notices if FEC files
     // were expected. Subsequent FDT entries declaring Raptor /
     // RaptorQ will surface "FEC unavailable" via FileDeliveryTable.
+#ifdef _WIN32
+    spdlog::warn("FecLoader: LoadLibrary({}) failed: {} — Raptor / RaptorQ unavailable",
+                 kSoname, LastErrorString());
+#else
     spdlog::warn("FecLoader: dlopen({}) failed: {} — Raptor / RaptorQ unavailable",
                  kSoname, ::dlerror());
+#endif
     return;
   }
 
@@ -70,7 +127,11 @@ FecLoader::FecLoader() {
       _handle, "bitstem_fec_c_abi_version");
   if (c_abi_version == nullptr) {
     spdlog::error("FecLoader: {} missing bitstem_fec_c_abi_version", kSoname);
+#ifdef _WIN32
+    ::FreeLibrary(static_cast<HMODULE>(_handle));
+#else
     ::dlclose(_handle);
+#endif
     _handle = nullptr;
     return;
   }
@@ -78,7 +139,11 @@ FecLoader::FecLoader() {
   if (abi != BITSTEM_FEC_C_ABI_VERSION) {
     spdlog::error("FecLoader: {} reports ABI v{}; libflute compiled for v{}",
                   kSoname, abi, BITSTEM_FEC_C_ABI_VERSION);
+#ifdef _WIN32
+    ::FreeLibrary(static_cast<HMODULE>(_handle));
+#else
     ::dlclose(_handle);
+#endif
     _handle = nullptr;
     return;
   }
@@ -117,7 +182,11 @@ FecLoader::FecLoader() {
       decoder_try_decode && decoder_is_decoded;
   if (!all_resolved) {
     spdlog::error("FecLoader: {} missing one or more bitstem_fec_* symbols", kSoname);
+#ifdef _WIN32
+    ::FreeLibrary(static_cast<HMODULE>(_handle));
+#else
     ::dlclose(_handle);
+#endif
     _handle = nullptr;
     return;
   }
