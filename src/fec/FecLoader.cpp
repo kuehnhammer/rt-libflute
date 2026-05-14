@@ -29,15 +29,22 @@ namespace LibFlute {
 
 namespace {
 
-// Codec library to load. On POSIX we dlopen the SONAME (libfec.so.0)
-// rather than the unversioned libfec.so symlink so a major-version
-// bump on the codec side surfaces as a clean load failure here
-// rather than silently picking up an ABI-incompatible build. On
-// Windows DLLs aren't soname-versioned — LoadLibrary takes the bare
-// filename — and the FetchContent-style packaging staged by
-// BitstemFEC.cmake ships exactly one fec.dll per zip.
+// Codec library to load. On POSIX ELF systems we dlopen the SONAME
+// (libfec.so.0) rather than the unversioned libfec.so symlink so a
+// major-version bump on the codec side surfaces as a clean load
+// failure here rather than silently picking up an ABI-incompatible
+// build. macOS Mach-O follows the same versioning intent but with
+// a different file-naming convention: libfec.0.dylib is the
+// major-versioned symlink, libfec.${PROJECT_VERSION}.dylib the
+// underlying real file; dlopen("libfec.0.dylib") resolves the same
+// way dlopen("libfec.so.0") does on Linux. Windows DLLs aren't
+// soname-versioned — LoadLibrary takes the bare filename — and the
+// FetchContent-style packaging staged by BitstemFEC.cmake ships
+// exactly one fec.dll per zip.
 #ifdef _WIN32
 constexpr const char* kSoname = "fec.dll";
+#elif defined(__APPLE__)
+constexpr const char* kSoname = "libfec.0.dylib";
 #else
 constexpr const char* kSoname = "libfec.so.0";
 #endif
