@@ -8,12 +8,10 @@
 // in this example, not in the library — the library has no idea
 // where the bytes came from.
 //
-#include <argp.h>
+#include <getopt.h>
 #include <arpa/inet.h>
 #include <cstring>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/udp.h>
 #include <pcap.h>
 #include <syslog.h>
 
@@ -32,6 +30,36 @@
 
 namespace {
 
+// Wire-layout structs for the bytes we read off pcap frames. Linux's
+// <netinet/ip.h> ships `struct iphdr` and BSD/macOS's ships `struct
+// ip` instead, with different field names for the same on-wire
+// layout (RFC 791 + 768). Rather than #ifdef'ing per platform, parse
+// the bytes ourselves — the IPv4 + UDP headers are fixed format and
+// trivially POD-mappable.
+#pragma pack(push, 1)
+struct WireIPv4 {
+  std::uint8_t  ver_ihl;     // version<<4 | ihl
+  std::uint8_t  tos;
+  std::uint16_t total_len;
+  std::uint16_t id;
+  std::uint16_t flags_frag;
+  std::uint8_t  ttl;
+  std::uint8_t  protocol;
+  std::uint16_t check;
+  std::uint32_t saddr;
+  std::uint32_t daddr;
+};
+static_assert(sizeof(WireIPv4) == 20, "IPv4 header is 20 bytes on the wire");
+
+struct WireUDP {
+  std::uint16_t sport;
+  std::uint16_t dport;
+  std::uint16_t len;
+  std::uint16_t check;
+};
+static_assert(sizeof(WireUDP) == 8, "UDP header is 8 bytes on the wire");
+#pragma pack(pop)
+
 struct Args {
   const char* capture_file = nullptr;
   const char* mcast_target = "238.1.1.95";
@@ -41,44 +69,61 @@ struct Args {
   const char* download_dir = nullptr;
 };
 
-argp_option options[] = {
-    {"capture-file", 'c', "FILE", 0, "Pcap capture file to replay (REQUIRED)", 0},
-    {"target", 'm', "IP", 0, "Multicast (or unicast) target IP to filter (default: 238.1.1.95)", 0},
-    {"port", 'p', "PORT", 0, "UDP port (default: 40085)", 0},
-    {"tsi", 't', "TSI", 0, "Session TSI (default: 16)", 0},
-    {"log-level", 'l', "LEVEL", 0, "Log verbosity 0..6 (default: 2)", 0},
-    {"download-dir", 'd', "DIR", 0, "Where to write received files (default: cwd)", 0},
-    {nullptr, 0, nullptr, 0, nullptr, 0},
+// getopt_long is POSIX. argp was GNU-libc-only, which kept the
+// examples Linux-host-only; this replacement compiles on macOS too
+// (BSD libc) without changing the user-facing CLI surface.
+const option long_options[] = {
+    {"capture-file", required_argument, nullptr, 'c'},
+    {"target",       required_argument, nullptr, 'm'},
+    {"port",         required_argument, nullptr, 'p'},
+    {"tsi",          required_argument, nullptr, 't'},
+    {"log-level",    required_argument, nullptr, 'l'},
+    {"download-dir", required_argument, nullptr, 'd'},
+    {"help",         no_argument,       nullptr, 'h'},
+    {"version",      no_argument,       nullptr, 'V'},
+    {nullptr, 0, nullptr, 0},
 };
+constexpr const char* kShortOptions = "c:m:p:t:l:d:hV";
 
-error_t parse_opt(int key, char* arg, argp_state* state) {
-  auto* a = static_cast<Args*>(state->input);
-  switch (key) {
-    case 'c': a->capture_file = arg; break;
-    case 'm': a->mcast_target = arg; break;
-    case 'p': a->mcast_port   = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
-    case 't': a->tsi          = strtoull(arg, nullptr, 10); break;
-    case 'l': a->log_level    = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
-    case 'd': a->download_dir = arg; break;
-    default: return ARGP_ERR_UNKNOWN;
-  }
-  return 0;
-}
-
-void print_version(FILE* stream, argp_state*) {
-  std::fprintf(stream, "%d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+void print_usage(const char* prog) {
+  std::fprintf(stderr,
+      "FLUTE/ALC pcap-replay receiver demo.\n"
+      "Usage: %s --capture-file=<pcap> [OPTIONS]\n"
+      "\n"
+      "  -c, --capture-file FILE   Pcap capture file to replay (REQUIRED)\n"
+      "  -m, --target IP           Multicast (or unicast) target IP to filter (default: 238.1.1.95)\n"
+      "  -p, --port PORT           UDP port (default: 40085)\n"
+      "  -t, --tsi TSI             Session TSI (default: 16)\n"
+      "  -l, --log-level LEVEL     Log verbosity 0..6 (default: 2)\n"
+      "  -d, --download-dir DIR    Where to write received files (default: cwd)\n"
+      "  -h, --help                Show this help and exit\n"
+      "  -V, --version             Show version and exit\n",
+      prog);
 }
 
 }  // namespace
 
-void (*argp_program_version_hook)(FILE*, argp_state*) = print_version;
-
 int main(int argc, char** argv) {
   Args args;
-  argp argp_spec = {options, parse_opt, nullptr,
-                     "FLUTE/ALC pcap-replay receiver demo.",
-                     nullptr, nullptr, nullptr};
-  argp_parse(&argp_spec, argc, argv, 0, nullptr, &args);
+  int c;
+  while ((c = ::getopt_long(argc, argv, kShortOptions,
+                             long_options, nullptr)) != -1) {
+    switch (c) {
+      case 'c': args.capture_file = optarg; break;
+      case 'm': args.mcast_target = optarg; break;
+      case 'p': args.mcast_port   = static_cast<unsigned short>(strtoul(optarg, nullptr, 10)); break;
+      case 't': args.tsi          = strtoull(optarg, nullptr, 10); break;
+      case 'l': args.log_level    = static_cast<unsigned>(strtoul(optarg, nullptr, 10)); break;
+      case 'd': args.download_dir = optarg; break;
+      case 'h': print_usage(argv[0]); return 0;
+      case 'V':
+        std::fprintf(stdout, "%d.%d.%d\n",
+                     VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+        return 0;
+      case '?': return 1;
+      default:  return 1;
+    }
+  }
 
   if (args.capture_file == nullptr) {
     std::fprintf(stderr, "usage: --capture-file=<pcap>\n");
@@ -159,18 +204,21 @@ int main(int argc, char** argv) {
       spdlog::warn("unsupported pcap link type {}", link_type);
       continue;
     }
-    if (hdr->caplen < link_offset + sizeof(iphdr) + sizeof(udphdr)) continue;
+    if (hdr->caplen < link_offset + sizeof(WireIPv4) + sizeof(WireUDP)) continue;
 
-    const auto* ip = reinterpret_cast<const iphdr*>(pkt + link_offset);
-    const std::size_t ip_hl = static_cast<std::size_t>(ip->ihl) * 4U;
-    if (ip->version != 4 || ip->protocol != IPPROTO_UDP) continue;
-    if (hdr->caplen < link_offset + ip_hl + sizeof(udphdr)) continue;
+    const auto* ip = reinterpret_cast<const WireIPv4*>(pkt + link_offset);
+    const std::size_t ip_hl =
+        static_cast<std::size_t>(ip->ver_ihl & 0x0F) * 4U;
+    const std::uint8_t ip_version =
+        static_cast<std::uint8_t>((ip->ver_ihl >> 4) & 0x0F);
+    if (ip_version != 4 || ip->protocol != IPPROTO_UDP) continue;
+    if (hdr->caplen < link_offset + ip_hl + sizeof(WireUDP)) continue;
 
     const auto* udp =
-        reinterpret_cast<const udphdr*>(pkt + link_offset + ip_hl);
-    const std::size_t udp_payload_offset = link_offset + ip_hl + sizeof(udphdr);
+        reinterpret_cast<const WireUDP*>(pkt + link_offset + ip_hl);
+    const std::size_t udp_payload_offset = link_offset + ip_hl + sizeof(WireUDP);
     const std::size_t udp_payload_len =
-        static_cast<std::size_t>(ntohs(udp->len)) - sizeof(udphdr);
+        static_cast<std::size_t>(ntohs(udp->len)) - sizeof(WireUDP);
     if (hdr->caplen < udp_payload_offset + udp_payload_len) continue;
 
     decoder.feed_packet({pkt + udp_payload_offset, udp_payload_len});

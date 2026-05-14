@@ -5,7 +5,7 @@
 // Network handling lives entirely here in the example, not in the
 // library — this is the pattern consumers should mirror.
 //
-#include <argp.h>
+#include <getopt.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -43,51 +43,69 @@ struct Args {
   char** files = nullptr;
 };
 
-argp_option options[] = {
-    {"target", 'm', "IP", 0, "Target multicast address (default: 238.1.1.95)", 0},
-    {"port", 'p', "PORT", 0, "Target port (default: 40085)", 0},
-    {"mtu", 't', "BYTES", 0, "Path MTU to size ALC packets for (default: 1500)", 0},
-    {"rate-limit", 'r', "KBPS", 0, "Transmit rate limit in kbps; 0 = unlimited (default: 1000)", 0},
-    {"fec", 'f', "FEC", 0, "FEC scheme: 0 = Compact No-Code, 1 = Raptor (default: 0)", 0},
-    {"tsi", 's', "TSI", 0, "Session TSI (default: 16)", 0},
-    {"log-level", 'l', "LEVEL", 0, "Log verbosity 0..6 (default: 2)", 0},
-    {nullptr, 0, nullptr, 0, nullptr, 0},
+// getopt_long is POSIX. argp was GNU-libc-only, which kept the
+// examples Linux-host-only; this replacement compiles on macOS too
+// (BSD libc) without changing the user-facing CLI surface.
+const option long_options[] = {
+    {"target",     required_argument, nullptr, 'm'},
+    {"port",       required_argument, nullptr, 'p'},
+    {"mtu",        required_argument, nullptr, 't'},
+    {"rate-limit", required_argument, nullptr, 'r'},
+    {"fec",        required_argument, nullptr, 'f'},
+    {"tsi",        required_argument, nullptr, 's'},
+    {"log-level",  required_argument, nullptr, 'l'},
+    {"help",       no_argument,       nullptr, 'h'},
+    {"version",    no_argument,       nullptr, 'V'},
+    {nullptr, 0, nullptr, 0},
 };
+constexpr const char* kShortOptions = "m:p:t:r:f:s:l:hV";
 
-error_t parse_opt(int key, char* arg, argp_state* state) {
-  auto* a = static_cast<Args*>(state->input);
-  switch (key) {
-    case 'm': a->mcast_target = arg; break;
-    case 'p': a->mcast_port    = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
-    case 't': a->mtu           = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
-    case 'r': a->rate_limit_kbps = static_cast<std::uint32_t>(strtoul(arg, nullptr, 10)); break;
-    case 'f': a->fec           = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
-    case 's': a->tsi           = strtoull(arg, nullptr, 10); break;
-    case 'l': a->log_level     = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
-    case ARGP_KEY_NO_ARGS: argp_usage(state); break;
-    case ARGP_KEY_ARG:
-      a->files = &state->argv[state->next - 1];
-      state->next = state->argc;
-      break;
-    default: return ARGP_ERR_UNKNOWN;
-  }
-  return 0;
-}
-
-void print_version(FILE* stream, argp_state*) {
-  std::fprintf(stream, "%d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+void print_usage(const char* prog) {
+  std::fprintf(stderr,
+      "FLUTE/ALC transmitter demo (plain POSIX UDP).\n"
+      "Usage: %s [OPTIONS] FILE...\n"
+      "\n"
+      "  -m, --target IP         Target multicast address (default: 238.1.1.95)\n"
+      "  -p, --port PORT         Target port (default: 40085)\n"
+      "  -t, --mtu BYTES         Path MTU to size ALC packets for (default: 1500)\n"
+      "  -r, --rate-limit KBPS   Transmit rate limit in kbps; 0 = unlimited (default: 1000)\n"
+      "  -f, --fec FEC           FEC scheme: 0 = Compact No-Code, 1 = Raptor (default: 0)\n"
+      "  -s, --tsi TSI           Session TSI (default: 16)\n"
+      "  -l, --log-level LEVEL   Log verbosity 0..6 (default: 2)\n"
+      "  -h, --help              Show this help and exit\n"
+      "  -V, --version           Show version and exit\n",
+      prog);
 }
 
 }  // namespace
 
-void (*argp_program_version_hook)(FILE*, argp_state*) = print_version;
-
 int main(int argc, char** argv) {
   Args args;
-  argp argp_spec = {options, parse_opt, "[FILE...]",
-                     "FLUTE/ALC transmitter demo (plain POSIX UDP).",
-                     nullptr, nullptr, nullptr};
-  argp_parse(&argp_spec, argc, argv, 0, nullptr, &args);
+  int c;
+  while ((c = ::getopt_long(argc, argv, kShortOptions,
+                             long_options, nullptr)) != -1) {
+    switch (c) {
+      case 'm': args.mcast_target = optarg; break;
+      case 'p': args.mcast_port      = static_cast<unsigned short>(strtoul(optarg, nullptr, 10)); break;
+      case 't': args.mtu             = static_cast<unsigned short>(strtoul(optarg, nullptr, 10)); break;
+      case 'r': args.rate_limit_kbps = static_cast<std::uint32_t>(strtoul(optarg, nullptr, 10)); break;
+      case 'f': args.fec             = static_cast<unsigned>(strtoul(optarg, nullptr, 10)); break;
+      case 's': args.tsi             = strtoull(optarg, nullptr, 10); break;
+      case 'l': args.log_level       = static_cast<unsigned>(strtoul(optarg, nullptr, 10)); break;
+      case 'h': print_usage(argv[0]); return 0;
+      case 'V':
+        std::fprintf(stdout, "%d.%d.%d\n",
+                     VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+        return 0;
+      case '?': return 1;  // getopt already printed the error
+      default:  return 1;
+    }
+  }
+  if (optind >= argc) {
+    print_usage(argv[0]);
+    return 1;
+  }
+  args.files = &argv[optind];
 
   auto syslog_sink = spdlog::syslog_logger_mt(
       "syslog", "flute-transmitter", LOG_PID | LOG_PERROR | LOG_CONS);

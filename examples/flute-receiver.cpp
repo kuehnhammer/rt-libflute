@@ -5,7 +5,7 @@
 // into a LibFlute::Decoder. Network handling is the example's job,
 // not the library's.
 //
-#include <argp.h>
+#include <getopt.h>
 #include <arpa/inet.h>
 #include <cstring>
 #include <netinet/in.h>
@@ -39,34 +39,38 @@ struct Args {
   unsigned nfiles = 0;
 };
 
-argp_option options[] = {
-    {"interface", 'i', "IP", 0, "Local interface to bind to (default: 0.0.0.0)", 0},
-    {"target", 'm', "IP", 0, "Multicast (or unicast) address to receive on (default: 238.1.1.95)", 0},
-    {"port", 'p', "PORT", 0, "UDP port (default: 40085)", 0},
-    {"tsi", 't', "TSI", 0, "Session TSI (default: 16)", 0},
-    {"log-level", 'l', "LEVEL", 0, "Log verbosity 0..6 (default: 2)", 0},
-    {"download-dir", 'd', "DIR", 0, "Where to write received files (default: cwd)", 0},
-    {"num-files", 'n', "N", 0, "Stop after N files received (default: never)", 0},
-    {nullptr, 0, nullptr, 0, nullptr, 0},
+// getopt_long is POSIX. argp was GNU-libc-only, which kept the
+// examples Linux-host-only; this replacement compiles on macOS too
+// (BSD libc) without changing the user-facing CLI surface.
+const option long_options[] = {
+    {"interface",    required_argument, nullptr, 'i'},
+    {"target",       required_argument, nullptr, 'm'},
+    {"port",         required_argument, nullptr, 'p'},
+    {"tsi",          required_argument, nullptr, 't'},
+    {"log-level",    required_argument, nullptr, 'l'},
+    {"download-dir", required_argument, nullptr, 'd'},
+    {"num-files",    required_argument, nullptr, 'n'},
+    {"help",         no_argument,       nullptr, 'h'},
+    {"version",      no_argument,       nullptr, 'V'},
+    {nullptr, 0, nullptr, 0},
 };
+constexpr const char* kShortOptions = "i:m:p:t:l:d:n:hV";
 
-error_t parse_opt(int key, char* arg, argp_state* state) {
-  auto* a = static_cast<Args*>(state->input);
-  switch (key) {
-    case 'i': a->iface = arg; break;
-    case 'm': a->mcast_target = arg; break;
-    case 'p': a->mcast_port = static_cast<unsigned short>(strtoul(arg, nullptr, 10)); break;
-    case 't': a->tsi = strtoull(arg, nullptr, 10); break;
-    case 'l': a->log_level = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
-    case 'd': a->download_dir = arg; break;
-    case 'n': a->nfiles = static_cast<unsigned>(strtoul(arg, nullptr, 10)); break;
-    default: return ARGP_ERR_UNKNOWN;
-  }
-  return 0;
-}
-
-void print_version(FILE* stream, argp_state*) {
-  std::fprintf(stream, "%d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+void print_usage(const char* prog) {
+  std::fprintf(stderr,
+      "FLUTE/ALC receiver demo (plain POSIX UDP).\n"
+      "Usage: %s [OPTIONS]\n"
+      "\n"
+      "  -i, --interface IP        Local interface to bind to (default: 0.0.0.0)\n"
+      "  -m, --target IP           Multicast (or unicast) address to receive on (default: 238.1.1.95)\n"
+      "  -p, --port PORT           UDP port (default: 40085)\n"
+      "  -t, --tsi TSI             Session TSI (default: 16)\n"
+      "  -l, --log-level LEVEL     Log verbosity 0..6 (default: 2)\n"
+      "  -d, --download-dir DIR    Where to write received files (default: cwd)\n"
+      "  -n, --num-files N         Stop after N files received (default: never)\n"
+      "  -h, --help                Show this help and exit\n"
+      "  -V, --version             Show version and exit\n",
+      prog);
 }
 
 bool ip_is_multicast(const sockaddr_in& a) {
@@ -75,14 +79,28 @@ bool ip_is_multicast(const sockaddr_in& a) {
 
 }  // namespace
 
-void (*argp_program_version_hook)(FILE*, argp_state*) = print_version;
-
 int main(int argc, char** argv) {
   Args args;
-  argp argp_spec = {options, parse_opt, nullptr,
-                     "FLUTE/ALC receiver demo (plain POSIX UDP).",
-                     nullptr, nullptr, nullptr};
-  argp_parse(&argp_spec, argc, argv, 0, nullptr, &args);
+  int c;
+  while ((c = ::getopt_long(argc, argv, kShortOptions,
+                             long_options, nullptr)) != -1) {
+    switch (c) {
+      case 'i': args.iface         = optarg; break;
+      case 'm': args.mcast_target  = optarg; break;
+      case 'p': args.mcast_port    = static_cast<unsigned short>(strtoul(optarg, nullptr, 10)); break;
+      case 't': args.tsi           = strtoull(optarg, nullptr, 10); break;
+      case 'l': args.log_level     = static_cast<unsigned>(strtoul(optarg, nullptr, 10)); break;
+      case 'd': args.download_dir  = optarg; break;
+      case 'n': args.nfiles        = static_cast<unsigned>(strtoul(optarg, nullptr, 10)); break;
+      case 'h': print_usage(argv[0]); return 0;
+      case 'V':
+        std::fprintf(stdout, "%d.%d.%d\n",
+                     VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+        return 0;
+      case '?': return 1;
+      default:  return 1;
+    }
+  }
 
   auto syslog_sink = spdlog::syslog_logger_mt(
       "syslog", "flute-receiver", LOG_PID | LOG_PERROR | LOG_CONS);

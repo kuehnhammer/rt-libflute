@@ -25,8 +25,8 @@ include_directories(
     )
 
 # Example apps deliberately exercise edge cases (raw byte buffers,
-# argp argument parsing, …) that trip the strict clang-tidy config
-# the library uses. Disable clang-tidy on the example TUs.
+# getopt_long argument parsing, …) that trip the strict clang-tidy
+# config the library uses. Disable clang-tidy on the example TUs.
 set(_example_no_tidy "")
 
 add_executable(flute-transmitter flute-transmitter.cpp)
