@@ -54,10 +54,13 @@ if(_BSF_PLATFORM STREQUAL "linux")
     endif()
 endif()
 
-# Architecture: only x86_64 today. ARM64 / Apple Silicon when the
-# bitstem-fec pipeline starts producing them.
+# Architecture: x86_64 (with microarch level suffix) on Intel
+# Linux/Windows, arm64 on Apple Silicon. The bitstem-fec packaging
+# pipeline produces a per-arch tarball for each supported target.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     set(_BSF_ARCH "x86_64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
+    set(_BSF_ARCH "arm64")
 else()
     message(FATAL_ERROR
         "BitstemFEC: unsupported CPU arch '${CMAKE_SYSTEM_PROCESSOR}'")
@@ -80,8 +83,19 @@ if(_BSF_PLATFORM STREQUAL "linux")
     set(_BSF_TARBALL_NAME
         "bitstem-fec-shared-${BSF_VERSION}-${BSF_DISTRO}-${_BSF_ARCH}-${BSF_MICROARCH}.tar.gz")
 elseif(_BSF_PLATFORM STREQUAL "macos")
-    set(_BSF_TARBALL_NAME
-        "bitstem-fec-shared-${BSF_VERSION}-macos-${_BSF_ARCH}-${BSF_MICROARCH}.tar.gz")
+    # macOS arm64 packages don't carry an x86-64-v3 style microarch
+    # suffix — the bitstem-fec packaging pipeline emits a single
+    # baseline-ARMv8-A tarball per release (works on every Apple
+    # Silicon shipped to date). The Intel-Mac case is left for the
+    # day someone needs it; it would slot in here with the x86_64 +
+    # microarch suffix exactly like Linux.
+    if(_BSF_ARCH STREQUAL "arm64")
+        set(_BSF_TARBALL_NAME
+            "bitstem-fec-shared-${BSF_VERSION}-macos-arm64.tar.gz")
+    else()
+        set(_BSF_TARBALL_NAME
+            "bitstem-fec-shared-${BSF_VERSION}-macos-${_BSF_ARCH}-${BSF_MICROARCH}.tar.gz")
+    endif()
 elseif(_BSF_PLATFORM STREQUAL "windows")
     # Windows ships a .zip with a .dll inside; same name+pin convention.
     set(_BSF_TARBALL_NAME
