@@ -54,10 +54,17 @@ find_package(spdlog REQUIRED)
 if(NOT WIN32)
   find_package(OpenSSL REQUIRED)
 endif()
-# tinyxml2: pkg-config on Linux/macOS where the existing flow works.
-# Windows uses find_package against the FetchContent override at the
-# parent scope (no pkg-config in the VS toolchain).
-if(WIN32)
+# tinyxml2: pkg-config on Linux (system libtinyxml2-dev). On Windows
+# and macOS the parent project (libs/5gbc-rx) FetchContent's tinyxml2
+# from source and exposes it via OVERRIDE_FIND_PACKAGE so the
+# find_package(tinyxml2) here resolves to the in-tree target. macOS
+# moved off pkg-config + Homebrew's libtinyxml2.dylib because the
+# Homebrew dylib carries Homebrew's signing Team ID — under Hardened
+# Runtime + Library Validation a notarized .app refuses to load it
+# (Team ID mismatch), and Homebrew doesn't ship a .a we could
+# statically link against. FetchContent + static is the only fully
+# self-contained route.
+if(WIN32 OR APPLE)
   find_package(tinyxml2 REQUIRED)
 else()
   find_package(PkgConfig REQUIRED)
@@ -163,6 +170,18 @@ if(WIN32)
   # needed (std::thread maps to native threads via the MSVC runtime).
   # tinyxml2 comes from the parent FetchContent override.
   target_link_libraries(flute LINK_PUBLIC tinyxml2::tinyxml2 bcrypt)
+elseif(APPLE)
+  # macOS: tinyxml2 also comes from the parent FetchContent override
+  # (see CMakeLists comment above for why) — same imported target
+  # name as Windows. OpenSSL stays Homebrew-dynamic; the EVP_MD5
+  # code path is dead-code-eliminated by the linker in the receiver
+  # build (only the transmit-side computes MD5s), so it never
+  # surfaces as an LC_LOAD_DYLIB.
+  target_link_libraries(flute LINK_PUBLIC
+    pthread
+    OpenSSL::Crypto
+    tinyxml2::tinyxml2
+  )
 else()
   target_link_libraries(flute LINK_PUBLIC
     pthread
