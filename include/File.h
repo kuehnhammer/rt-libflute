@@ -86,6 +86,18 @@ namespace LibFlute {
       bool complete() const { return _complete; };
 
      /**
+      *  True when this File completed reception but its assembled bytes
+      *  did NOT match the Content-MD5 digest advertised by the FDT.
+      *  RFC 6726 §3.4.2 calls Content-MD5 a "decoded object integrity
+      *  service"; libflute applies the check inside check_file_completion()
+      *  the moment _complete flips true (and after Raptor extract_file
+      *  has populated the buffer, when applicable). Always false when
+      *  the FDT did not advertise Content-MD5 — the attribute is
+      *  OPTIONAL and absence is not a failure.
+      */
+      bool integrity_check_failed() const { return _integrity_check_failed; };
+
+     /**
       *  Get the data buffer
       */
       char* buffer() const { return _buffer; };
@@ -165,6 +177,12 @@ namespace LibFlute {
       std::vector<LibFlute::SourceBlock> _source_blocks;
 
       bool _complete = false;
+
+      // Set once by check_file_completion() the first time _complete
+      // flips true AND the FDT advertised a Content-MD5 that does not
+      // match the assembled buffer. Stays false when Content-MD5 is
+      // absent (RFC 6726 §3.4.2 OPTIONAL).
+      bool _integrity_check_failed = false;
 
       // Maintained by check_source_block_completion() — incremented
       // once each time a SourceBlock.complete bit transitions false→

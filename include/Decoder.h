@@ -75,6 +75,14 @@ struct DecoderStats {
   // payload couldn't be recovered" dashboards.
   std::uint64_t bytes_discarded_incomplete = 0;
 
+  // Files that completed structurally (every source symbol arrived,
+  // FEC decode succeeded if applicable) but whose assembled bytes did
+  // NOT match the Content-MD5 attribute the FDT advertised. RFC 6726
+  // §3.4.2 treats Content-MD5 as a decoded-object integrity service;
+  // a mismatch is surfaced to the operator instead of the application
+  // (the completion callback is suppressed for failed files).
+  std::uint64_t md5sum_fail            = 0;
+
   std::uint64_t fdts_accepted          = 0;
   std::uint64_t fdts_rejected_expired  = 0;
   std::uint64_t fdts_rejected_stale    = 0;
@@ -196,6 +204,7 @@ class Decoder {
     std::atomic<std::uint64_t> files_completed{0};
     std::atomic<std::uint64_t> files_discarded_incomplete{0};
     std::atomic<std::uint64_t> bytes_discarded_incomplete{0};
+    std::atomic<std::uint64_t> md5sum_fail{0};
     std::atomic<std::uint64_t> fdts_accepted{0};
     std::atomic<std::uint64_t> fdts_rejected_expired{0};
     std::atomic<std::uint64_t> fdts_rejected_stale{0};

@@ -1095,7 +1095,7 @@ bool LibFlute::RaptorFEC::add_fdt_info(tinyxml2::XMLElement *file) {
     ssi[2] = static_cast<unsigned char>(N);
     ssi[3] = static_cast<unsigned char>(Al);
   }
-  std::string ssi_b64 = base64_encode({ssi.begin(), ssi.end()}, ssi.size());
+  std::string ssi_b64 = base64_encode(ssi.data(), ssi.size());
   file->SetAttribute("FEC-OTI-Scheme-Specific-Info", ssi_b64.c_str());
 
   is_encoder = true;

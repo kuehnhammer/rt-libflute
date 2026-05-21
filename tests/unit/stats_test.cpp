@@ -73,6 +73,7 @@ TEST(DecoderStats, FreshDecoderHasAllZeroCounters) {
     EXPECT_EQ(s.files_completed,             0U);
     EXPECT_EQ(s.files_discarded_incomplete,  0U);
     EXPECT_EQ(s.bytes_discarded_incomplete,  0U);
+    EXPECT_EQ(s.md5sum_fail,                 0U);
     EXPECT_EQ(s.fdts_accepted,               0U);
     EXPECT_EQ(s.fdts_rejected_expired,       0U);
     EXPECT_EQ(s.fdts_rejected_stale,         0U);

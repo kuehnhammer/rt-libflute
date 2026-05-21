@@ -19,12 +19,16 @@
 
 #include "Decoder.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <openssl/evp.h>
+#include <openssl/md5.h>
 
 #include <gtest/gtest.h>
 
@@ -42,9 +46,12 @@ std::span<const std::uint8_t> AsSpan(const std::vector<std::uint8_t>& v) {
 
 // Build a minimal FDT-Instance XML body with one File entry. The
 // FDT's transfer_length must equal this string's size so the receiver
-// allocates the right-sized buffer for it.
+// allocates the right-sized buffer for it. `content_md5` is emitted
+// verbatim when non-empty (callers exercise both the matching-digest
+// and tampered-digest cases).
 std::string BuildFdtXml(std::uint32_t file_toi, std::uint64_t file_size,
-                          std::uint32_t T, std::uint32_t max_sbl) {
+                          std::uint32_t T, std::uint32_t max_sbl,
+                          const std::string& content_md5 = "") {
     std::string xml;
     xml += R"(<?xml version="1.0" encoding="UTF-8"?>)";
     // NTP-epoch seconds for ~year 2058 — far enough out that the
@@ -58,7 +65,11 @@ std::string BuildFdtXml(std::uint32_t file_toi, std::uint64_t file_size,
     xml += "  <File TOI=\"" + std::to_string(file_toi) + "\"";
     xml += " Content-Location=\"target.bin\"";
     xml += " Content-Length=\"" + std::to_string(file_size) + "\"";
-    xml += " Transfer-Length=\"" + std::to_string(file_size) + "\"/>\n";
+    xml += " Transfer-Length=\"" + std::to_string(file_size) + "\"";
+    if (!content_md5.empty()) {
+        xml += " Content-MD5=\"" + content_md5 + "\"";
+    }
+    xml += "/>\n";
     xml += "</FDT-Instance>\n";
     return xml;
 }
@@ -264,4 +275,142 @@ TEST(Decoder, CompletionCallbackFiresWhenFileFullyReceived) {
     EXPECT_TRUE(received->complete());
     EXPECT_EQ(received->meta().toi, kFileToi);
     EXPECT_EQ(received->meta().content_location, "target.bin");
+}
+
+// RFC 6726 §3.4.2 calls Content-MD5 a "decoded object integrity
+// service". When the FDT advertises a digest, the receiver MUST
+// validate it against the bytes it actually assembled, and MUST NOT
+// surface a mismatched object as a successful delivery.
+//
+// Wire-level expectations for the Decoder when the digest fails:
+//   1. DecoderStats::md5sum_fail increments by 1.
+//   2. The completion callback does NOT fire (the consumer is not
+//      handed a corrupted file).
+//   3. files_completed does NOT advance (only validated deliveries
+//      count as "successfully delivered").
+TEST(Decoder, Md5MismatchSuppressesCallbackAndBumpsCounter) {
+    constexpr std::uint64_t kFileTransferLength = 64;
+    constexpr std::uint32_t kT = 64;
+    constexpr std::uint32_t kMaxSbl = 1;
+    constexpr std::uint16_t kFileToi = 9;
+
+    // 16 zero bytes encoded as base64. The file payload below is 64
+    // bytes of 0xDE, whose real MD5 will not match this hash.
+    const std::string kWrongMd5 = "AAAAAAAAAAAAAAAAAAAAAA==";
+
+    auto fdt_xml = BuildFdtXml(kFileToi, kFileTransferLength, kT, kMaxSbl,
+                                 kWrongMd5);
+
+    LibFlute::Decoder rx(/*tsi=*/1);
+
+    std::atomic<int> callback_count{0};
+    rx.register_completion_callback(
+        [&](std::shared_ptr<LibFlute::File>) { ++callback_count; });
+
+    libflute_test::DataPacketSpec fdt_spec;
+    fdt_spec.tsi = 1;
+    fdt_spec.toi = 0;
+    fdt_spec.codepoint = 0;
+    fdt_spec.add_ext_fdt = true;
+    fdt_spec.fdt_instance_id = 1;
+    fdt_spec.add_ext_fti = true;
+    fdt_spec.fti_transfer_length = fdt_xml.size();
+    fdt_spec.fti_encoding_symbol_length =
+        static_cast<std::uint16_t>(fdt_xml.size());
+    fdt_spec.fti_max_source_block_length = 1;
+    fdt_spec.symbol_bytes.assign(fdt_xml.begin(), fdt_xml.end());
+    rx.feed_packet(AsSpan(libflute_test::BuildDataPacket(fdt_spec)));
+
+    libflute_test::DataPacketSpec file_spec;
+    file_spec.tsi = 1;
+    file_spec.toi = kFileToi;
+    file_spec.codepoint = 0;
+    file_spec.sbn = 0;
+    file_spec.esi = 0;
+    file_spec.symbol_bytes = std::vector<std::uint8_t>(kT, 0xDE);
+    rx.feed_packet(AsSpan(libflute_test::BuildDataPacket(file_spec)));
+
+    const auto stats = rx.stats();
+    EXPECT_EQ(stats.md5sum_fail, 1u);
+    EXPECT_EQ(stats.files_completed, 0u);
+    EXPECT_EQ(callback_count.load(), 0);
+}
+
+// Counter-example: when the advertised digest matches the assembled
+// bytes, the completion path runs as usual and the failure counter
+// stays at zero. Pins the happy-path semantics so a regression that
+// over-flags everything as failed gets caught.
+TEST(Decoder, Md5MatchKeepsCounterAtZeroAndFiresCallback) {
+    constexpr std::uint64_t kFileTransferLength = 64;
+    constexpr std::uint32_t kT = 64;
+    constexpr std::uint32_t kMaxSbl = 1;
+    constexpr std::uint16_t kFileToi = 11;
+
+    // 64 bytes of 0xDE — compute its MD5 inline so the test stays
+    // self-contained. Standard base64, RFC 4648 §4 alphabet.
+    std::vector<std::uint8_t> payload(kT, 0xDE);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_len = 0;
+    {
+        auto* ctx = EVP_MD_CTX_new();
+        ASSERT_NE(ctx, nullptr);
+        ASSERT_EQ(EVP_DigestInit_ex(ctx, EVP_md5(), nullptr), 1);
+        ASSERT_EQ(EVP_DigestUpdate(ctx, payload.data(), payload.size()), 1);
+        ASSERT_EQ(EVP_DigestFinal_ex(ctx, digest.data(), &digest_len), 1);
+        EVP_MD_CTX_free(ctx);
+    }
+    ASSERT_EQ(digest_len, 16u);
+
+    // Inline base64 encode to avoid pulling utils/base64.h into the
+    // test target. 16 bytes → 24 chars including "==".
+    static const char* kB64 =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string md5_b64;
+    md5_b64.reserve(24);
+    for (std::size_t i = 0; i < 16; i += 3) {
+        const std::uint32_t b0 = digest[i];
+        const std::uint32_t b1 = (i + 1 < 16) ? digest[i + 1] : 0;
+        const std::uint32_t b2 = (i + 2 < 16) ? digest[i + 2] : 0;
+        md5_b64.push_back(kB64[(b0 >> 2) & 0x3F]);
+        md5_b64.push_back(kB64[((b0 << 4) | (b1 >> 4)) & 0x3F]);
+        md5_b64.push_back(i + 1 < 16 ? kB64[((b1 << 2) | (b2 >> 6)) & 0x3F] : '=');
+        md5_b64.push_back(i + 2 < 16 ? kB64[b2 & 0x3F] : '=');
+    }
+
+    auto fdt_xml = BuildFdtXml(kFileToi, kFileTransferLength, kT, kMaxSbl,
+                                 md5_b64);
+
+    LibFlute::Decoder rx(/*tsi=*/1);
+
+    std::atomic<int> callback_count{0};
+    rx.register_completion_callback(
+        [&](std::shared_ptr<LibFlute::File>) { ++callback_count; });
+
+    libflute_test::DataPacketSpec fdt_spec;
+    fdt_spec.tsi = 1;
+    fdt_spec.toi = 0;
+    fdt_spec.codepoint = 0;
+    fdt_spec.add_ext_fdt = true;
+    fdt_spec.fdt_instance_id = 1;
+    fdt_spec.add_ext_fti = true;
+    fdt_spec.fti_transfer_length = fdt_xml.size();
+    fdt_spec.fti_encoding_symbol_length =
+        static_cast<std::uint16_t>(fdt_xml.size());
+    fdt_spec.fti_max_source_block_length = 1;
+    fdt_spec.symbol_bytes.assign(fdt_xml.begin(), fdt_xml.end());
+    rx.feed_packet(AsSpan(libflute_test::BuildDataPacket(fdt_spec)));
+
+    libflute_test::DataPacketSpec file_spec;
+    file_spec.tsi = 1;
+    file_spec.toi = kFileToi;
+    file_spec.codepoint = 0;
+    file_spec.sbn = 0;
+    file_spec.esi = 0;
+    file_spec.symbol_bytes = payload;
+    rx.feed_packet(AsSpan(libflute_test::BuildDataPacket(file_spec)));
+
+    const auto stats = rx.stats();
+    EXPECT_EQ(stats.md5sum_fail, 0u);
+    EXPECT_EQ(stats.files_completed, 1u);
+    EXPECT_EQ(callback_count.load(), 1);
 }

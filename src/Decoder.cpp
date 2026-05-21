@@ -61,6 +61,20 @@ std::size_t Decoder::flush_pending_decodes() {
     ++completed;
     spdlog::debug("flush_pending_decodes: TOI {} completed", toi);
 
+    // RFC 6726 §3.4.2: drop integrity-failed files before fanning out
+    // to the application. The Content-MD5 check fires inside
+    // check_file_completion() when _complete flipped above, so by here
+    // integrity_check_failed() is authoritative.
+    if (file->integrity_check_failed()) {
+      spdlog::warn("flush_pending_decodes: dropping TOI {} ({}): "
+                   "Content-MD5 mismatch",
+                   toi, file->meta().content_location);
+      _stats.md5sum_fail.fetch_add(1, std::memory_order_relaxed);
+      const std::lock_guard<std::mutex> lock(_files_mutex);
+      _files.erase(toi);
+      continue;
+    }
+
     // Fire the completion callback under the same protocol the FDT
     // path uses (snapshot under lock, dispatch outside).
     CompletionCallback cb_snapshot;
@@ -231,12 +245,23 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
 
           spdlog::debug("File with TOI {} completed", alc.toi());
           if (alc.toi() != 0) {
-            _stats.files_completed.fetch_add(1, std::memory_order_relaxed);
-            if (_completion_cb) {
-              // Snapshot under the lock; dispatch after release.
-              completed_file    = _files[alc.toi()];
-              callback_snapshot = _completion_cb;
+            // RFC 6726 §3.4.2: a complete-but-corrupt object is NOT a
+            // successful delivery. Suppress the callback and bump the
+            // integrity-failure counter instead of files_completed.
+            if (_files[alc.toi()]->integrity_check_failed()) {
+              spdlog::warn("Dropping TOI {} ({}): Content-MD5 mismatch",
+                           alc.toi(),
+                           _files[alc.toi()]->meta().content_location);
+              _stats.md5sum_fail.fetch_add(1, std::memory_order_relaxed);
               _files.erase(alc.toi());
+            } else {
+              _stats.files_completed.fetch_add(1, std::memory_order_relaxed);
+              if (_completion_cb) {
+                // Snapshot under the lock; dispatch after release.
+                completed_file    = _files[alc.toi()];
+                callback_snapshot = _completion_cb;
+                _files.erase(alc.toi());
+              }
             }
           }
 
@@ -303,12 +328,21 @@ void Decoder::feed_packet(std::span<const std::uint8_t> alc_payload) {
                               t);
                 file->try_decode_pending();
                 if (file->complete()) {
-                  _stats.files_completed.fetch_add(
-                      1, std::memory_order_relaxed);
-                  if (_completion_cb && completed_file == nullptr) {
-                    completed_file    = file;
-                    callback_snapshot = _completion_cb;
+                  if (file->integrity_check_failed()) {
+                    spdlog::warn("Dropping abandoned TOI {} ({}): "
+                                 "Content-MD5 mismatch",
+                                 t, file->meta().content_location);
+                    _stats.md5sum_fail.fetch_add(
+                        1, std::memory_order_relaxed);
                     _files.erase(fit);
+                  } else {
+                    _stats.files_completed.fetch_add(
+                        1, std::memory_order_relaxed);
+                    if (_completion_cb && completed_file == nullptr) {
+                      completed_file    = file;
+                      callback_snapshot = _completion_cb;
+                      _files.erase(fit);
+                    }
                   }
                 }
               }
@@ -408,6 +442,7 @@ DecoderStats Decoder::stats() const {
   s.files_completed           = _stats.files_completed.load(std::memory_order_relaxed);
   s.files_discarded_incomplete = _stats.files_discarded_incomplete.load(std::memory_order_relaxed);
   s.bytes_discarded_incomplete = _stats.bytes_discarded_incomplete.load(std::memory_order_relaxed);
+  s.md5sum_fail               = _stats.md5sum_fail.load(std::memory_order_relaxed);
   s.fdts_accepted             = _stats.fdts_accepted.load(std::memory_order_relaxed);
   s.fdts_rejected_expired     = _stats.fdts_rejected_expired.load(std::memory_order_relaxed);
   s.fdts_rejected_stale       = _stats.fdts_rejected_stale.load(std::memory_order_relaxed);

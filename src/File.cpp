@@ -123,7 +123,7 @@ LibFlute::File::File(uint32_t toi,
   _meta.content_location = std::move(content_location);
   _meta.content_type = std::move(content_type);
   _meta.content_length = length;
-  _meta.content_md5 = base64_encode({std::begin(md5), std::end(md5)}, MD5_DIGEST_LENGTH);
+  _meta.content_md5 = base64_encode(md5.data(), MD5_DIGEST_LENGTH);
   _meta.expires = expires;
   _meta.fec_oti = fec_oti;
 
@@ -270,11 +270,41 @@ auto LibFlute::File::check_file_completion() -> void
   // The previous std::all_of was hot on the encoder path (called
   // per dispatched packet) and quadratic in Z for CompactNoCode
   // files with thousands of blocks.
+  const bool was_complete = _complete;
   _complete = (_complete_block_count == _source_blocks.size());
 
   if (_complete && !_meta.content_md5.empty()) {
       if(_meta.fec_transformer){
           _meta.fec_transformer->extract_file(_source_blocks);
+      }
+
+      // RFC 6726 §3.4.2: Content-MD5 is the "decoded object integrity
+      // service". Validate the assembled buffer against the FDT's
+      // advertised digest the first time _complete flips true. Only
+      // run once: re-entering with _complete already true (e.g. a
+      // stray try_decode_pending) would just recompute the same hash.
+      if (!was_complete && _meta.content_length > 0 && _buffer != nullptr) {
+          std::array<unsigned char, EVP_MAX_MD_SIZE> computed{};
+          const int md5_len = calculate_md5(_buffer, _meta.content_length,
+                                            computed.data());
+          // base64_decode tolerates both standard and URL-safe alphabets
+          // / pad chars, so we accept whatever a (possibly non-strict)
+          // sender emitted and let the raw byte comparison decide.
+          std::string expected;
+          try {
+              expected = base64_decode(_meta.content_md5);
+          } catch (const std::exception& e) {
+              spdlog::warn("Content-MD5 for TOI {} is not valid base64: {}",
+                           _meta.toi, e.what());
+          }
+          if (md5_len != static_cast<int>(MD5_DIGEST_LENGTH) ||
+              expected.size() != MD5_DIGEST_LENGTH ||
+              std::memcmp(expected.data(), computed.data(),
+                          MD5_DIGEST_LENGTH) != 0) {
+              spdlog::error("Content-MD5 mismatch for TOI {} ({})",
+                            _meta.toi, _meta.content_location);
+              _integrity_check_failed = true;
+          }
       }
   }
 }
